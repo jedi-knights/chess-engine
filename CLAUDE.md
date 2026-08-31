@@ -42,8 +42,8 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 4. ✅ Pawn moves (pushes, double, captures, ep, promotions incl. underpromotion + capture-promotion)
 5. ✅ Sliding pieces — bishop, rook, queen (naive per-step rays; magic bitboards deferred)
 6. ✅ Castling (rights + emptiness + king start/transit/land squares not attacked)
-7. ⬜ Legality filter (king-not-in-check after move)
-8. ⬜ Search in `cmd_go` (negamax + alpha-beta; blocked on full movegen + eval)
+7. ✅ Legality filter — make/unmake round-trip + `is_square_attacked` on own king. **All 6 standard perft positions match through depth 4** (~10.7M node checks) — move generation is provably correct.
+8. ⬜ Search in `cmd_go` (negamax + alpha-beta; needs an evaluation function)
 
 Do not skip a milestone. Perft numbers stay artificially low until every piece type generates, but each milestone's *round-trip* invariants (see `tests/test_position.cpp`) must hold before advancing.
 
@@ -65,7 +65,7 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
 
 ## Perft gotcha
 
-Position 4 in the standard suite has **no white king** — it's a contrived position for isolating castling/promotion. `make_move`'s king-count assertion is `<= 1`, not `== 1`, to accommodate this. Do not tighten it.
+`make_move`'s king-count assertion is `<= 1`, not `== 1`. Real games and every current perft position have exactly one king per side, but the loose form defends against hand-constructed test positions that omit a king (bishop-only slider tests, etc.). Do not tighten it without auditing every test FEN.
 
 ## Move encoding (types.h)
 

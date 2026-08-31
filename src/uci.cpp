@@ -35,7 +35,7 @@ static void cmd_position(std::istringstream& is, Position& pos) {
     while (is >> token) { /* drain */ }
 }
 
-static void cmd_go(const Position& pos, std::ostream& out) {
+static void cmd_go(Position& pos, std::ostream& out) {
     // TODO: real search. For now, always emit a null bestmove so a GUI
     //       will not hang waiting for a response.
     std::vector<Move> moves;

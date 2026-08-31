@@ -250,3 +250,84 @@ TEST_CASE("castling: black castles both sides symmetrically") {
     CHECK(contains_move(moves, ::make_move(E8, G8, MT_CASTLING)));
     CHECK(contains_move(moves, ::make_move(E8, C8, MT_CASTLING)));
 }
+
+// --- Legality filter ----------------------------------------------------
+
+TEST_CASE("legality: king cannot move into a square attacked by an enemy piece") {
+    // Black rook on d8 attacks the entire d-file. White king at e1 can move
+    // to d1 or d2 only if those aren't attacked — but they are.
+    Position pos;
+    REQUIRE(pos.set_from_fen("3r4/8/8/8/8/8/8/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, D1)));
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, D2)));
+    CHECK(contains_move(moves, ::make_move(E1, E2)));
+    CHECK(contains_move(moves, ::make_move(E1, F1)));
+    CHECK(contains_move(moves, ::make_move(E1, F2)));
+    CHECK(count_moves_from(moves, E1) == 3);
+}
+
+TEST_CASE("legality: pinned piece cannot move off the pin line") {
+    // Black rook on e8 pins white bishop on e2 to the king on e1. Bishop
+    // moves off the e-file leave the king in check → filtered.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4r3/8/8/8/8/8/4B3/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    // Every bishop move from e2 leaves the e-file (bishops only move diagonally),
+    // so all bishop moves are pinned out.
+    CHECK(count_moves_from(moves, E2) == 0);
+}
+
+TEST_CASE("legality: pinned piece CAN move along the pin line (incl. capture pinner)") {
+    // Black rook on e8 pins white rook on e5 along the e-file. The pinned
+    // rook can still move along the e-file, including capturing the pinner.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4r3/8/8/4R3/8/8/8/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(E5, E6)));      // along pin
+    CHECK(contains_move(moves, ::make_move(E5, E7)));      // along pin
+    CHECK(contains_move(moves, ::make_move(E5, E8)));      // capture the pinner
+    CHECK_FALSE(contains_move(moves, ::make_move(E5, D5))); // off pin
+    CHECK_FALSE(contains_move(moves, ::make_move(E5, F5))); // off pin
+    CHECK_FALSE(contains_move(moves, ::make_move(E5, A5))); // off pin
+}
+
+TEST_CASE("legality: king in check must address the check") {
+    // Black rook on e8 checks the white king on e1. Legal king moves are
+    // only squares that escape the e-file (or capture the checker, which
+    // isn't reachable). No other piece exists to block or capture.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4r3/8/8/8/8/8/8/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, E2)));  // still on e-file
+    CHECK(contains_move(moves, ::make_move(E1, D1)));
+    CHECK(contains_move(moves, ::make_move(E1, D2)));
+    CHECK(contains_move(moves, ::make_move(E1, F1)));
+    CHECK(contains_move(moves, ::make_move(E1, F2)));
+    CHECK(moves.size() == 4);
+}
+
+TEST_CASE("legality: checkmate produces zero legal moves") {
+    // Back-rank mate: white king on h1, own pawns on g2/h2 blocking escape,
+    // black rook on f1 delivering check along the 1st rank.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/6PP/5r1K w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(moves.empty());
+}
+
+TEST_CASE("legality: stalemate produces zero legal moves and is NOT checkmate") {
+    // White king on e1 not in check, but every escape square is either an
+    // own piece, attacked by the black king on e3, or attacked by the black
+    // pawn on e2. Classic king-and-pawn stalemate shape.
+    Position pos;
+    REQUIRE(pos.set_from_fen("8/8/8/8/8/4k3/4p3/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(moves.empty());
+}

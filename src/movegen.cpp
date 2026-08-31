@@ -2,6 +2,8 @@
 #include "attacks.h"
 #include "bitboard.h"
 
+#include <algorithm>
+
 namespace {
 
 // File/rank masks used only by pawn generation. Kept file-local so
@@ -203,9 +205,26 @@ void generate_slider_moves(const Position& pos, std::vector<Move>& moves) {
     }
 }
 
+// Legality filter: apply `m`, ask whether the mover's king is now attacked
+// by the opponent, unapply. Cheap in the current naive-ray movegen; magic
+// bitboards + pin/check awareness can bypass this for most moves later.
+bool is_legal(Position& pos, Move m) {
+    const Color us = pos.side_to_move;
+    UndoInfo u;
+    pos.make_move(m, u);
+    // Kings can be temporarily absent in contrived perft positions (see the
+    // "Position 4 has no white king" note in CLAUDE.md) — treat as legal so
+    // the generator still returns something for those artificial cases.
+    Bitboard king_bb = pos.pieces[us][KING];
+    bool safe = (king_bb == 0) ||
+                !is_square_attacked(pos, lsb(king_bb), pos.side_to_move);
+    pos.unmake_move(m, u);
+    return safe;
+}
+
 }  // namespace
 
-void generate_moves(const Position& pos, std::vector<Move>& moves) {
+void generate_moves(Position& pos, std::vector<Move>& moves) {
     const Color    us         = pos.side_to_move;
     const Bitboard our_pieces = pos.colors[us];
     Bitboard       knights    = pos.pieces[us][KNIGHT];
@@ -235,4 +254,13 @@ void generate_moves(const Position& pos, std::vector<Move>& moves) {
     generate_pawn_moves(pos, moves);
     generate_slider_moves(pos, moves);
     generate_castling(pos, moves);
+
+    // Post-filter: drop any pseudo-legal move that leaves our king in check.
+    // Castling is already legality-filtered inside generate_castling, but
+    // is_legal is cheap on those and produces the same answer, so uniform
+    // filtering here is simpler than trying to short-circuit them out.
+    moves.erase(
+        std::remove_if(moves.begin(), moves.end(),
+                       [&](Move m) { return !is_legal(pos, m); }),
+        moves.end());
 }

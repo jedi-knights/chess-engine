@@ -43,18 +43,18 @@ $ ./engine perft 2 | grep "Startpos" -A 2
 
 ## Features
 
-Currently implemented:
+Currently implemented (movegen milestones 1-7 complete):
 
 - Bitboard position representation (piece mailbox + per-color/per-type bitboards + occupancy)
 - FEN parsing and emission (round-tripped by the test suite)
 - `Position::make_move` / `unmake_move` with a caller-owned `UndoInfo` — supports normal, capture, en passant, castling, and promotion move types
-- Pseudo-legal move generation for **knights, king, and pawns** (single push, double push, captures, en passant, promotion with under-promotion, capture-promotion)
+- **Fully legal** move generation for all piece types (knights, king, pawns with all special cases, sliders, castling) with a king-not-in-check legality filter. Perft matches the six standard positions through depth 4 (~10.7M node checks).
 - Precomputed leaper attack tables (knight, king, pawn)
 - Perft driver and 6-position standard test suite
 - UCI protocol scaffold (`uci`, `isready`, `ucinewgame`, `position`, `go`, `d`, `quit`)
 - doctest unit test suite compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
-Coming (see the [milestone roadmap](CLAUDE.md#movegen-milestone-roadmap)): sliding pieces (bishop, rook, queen), castling generation, legal-move filter, negamax + alpha-beta search, material evaluation.
+Coming (see the [milestone roadmap](CLAUDE.md#movegen-milestone-roadmap)): negamax + alpha-beta search, material evaluation, magic bitboards for slider attack speedup.
 
 ## Requirements
 
