@@ -80,7 +80,7 @@ void cmd_position(std::istringstream& is, Position& pos) {
     while (is >> token) {
         Move m = parse_uci_move(pos, token);
         if (m == NULL_MOVE) return;
-        std::vector<Move> legal;
+        MoveList legal;
         generate_moves(pos, legal);
         if (std::find(legal.begin(), legal.end(), m) == legal.end()) return;
         UndoInfo u;

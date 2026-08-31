@@ -5,7 +5,7 @@
 
 uint64_t perft(Position& pos, int depth) {
     if (depth == 0) return 1;
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     uint64_t nodes = 0;
     UndoInfo u;

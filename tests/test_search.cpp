@@ -23,7 +23,7 @@ TEST_CASE("search returns a legal move for the starting position") {
 
     // The chosen move must be one the generator would emit — anything else
     // means search invented an illegal move.
-    std::vector<Move> legal;
+    MoveList legal;
     generate_moves(pos, legal);
     CHECK(contains_move(legal, r.best_move));
 }

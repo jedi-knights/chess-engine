@@ -136,7 +136,7 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
 // history hints woven in. std::sort is O(N log N) per call — cheap at
 // chess branching factors — but could later be replaced with a lazy
 // selection-sort that avoids sorting the tail after a beta cutoff.
-void order_moves(const Position& pos, std::vector<Move>& moves,
+void order_moves(const Position& pos, MoveList& moves,
                  Move tt_move, const SearchContext& ctx, int ply) {
     std::sort(moves.begin(), moves.end(),
               [&](Move a, Move b) {
@@ -173,7 +173,7 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
         if (stand_pat > alpha)   alpha = stand_pat;
     }
 
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
 
     if (moves.empty()) {
@@ -225,7 +225,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return score_from_tt(tt_score, ply);
     }
 
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
 
     if (moves.empty()) {
@@ -280,7 +280,7 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
                  SearchResult& out) {
     ++ctx.nodes;   // count the root
 
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
 
     if (moves.empty()) {
@@ -371,7 +371,7 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
     // holds. (Genuine mate/stalemate → generate_moves is empty → keep
     // NULL_MOVE, which serializes as "0000" per protocol.)
     if (best.best_move == NULL_MOVE) {
-        std::vector<Move> moves;
+        MoveList moves;
         generate_moves(pos, moves);
         if (!moves.empty()) {
             best.best_move = moves[0];

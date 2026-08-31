@@ -115,7 +115,7 @@ TEST_CASE("round-trip: parse_uci_move(move_to_uci(m)) == m for every legal move"
     for (const auto& fen : STANDARD_FENS) {
         Position pos;
         REQUIRE(pos.set_from_fen(fen));
-        std::vector<Move> moves;
+        MoveList moves;
         generate_moves(pos, moves);
         for (Move m : moves) {
             std::string s = move_to_uci(m);

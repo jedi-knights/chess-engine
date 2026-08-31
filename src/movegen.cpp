@@ -19,7 +19,7 @@ constexpr Bitboard RANK_8_BB = 0xFF00000000000000ULL;
 // Emit one normal/ep move OR four promotion moves (Q, R, B, N) when the
 // destination sits on the promotion rank.
 inline void emit_pawn_move(Square from, Square to, Bitboard promo_rank,
-                           MoveType mt, std::vector<Move>& moves) {
+                           MoveType mt, MoveList& moves) {
     if (square_bb(to) & promo_rank) {
         moves.push_back(make_move(from, to, MT_PROMOTION, QUEEN));
         moves.push_back(make_move(from, to, MT_PROMOTION, ROOK));
@@ -30,7 +30,7 @@ inline void emit_pawn_move(Square from, Square to, Bitboard promo_rank,
     }
 }
 
-void generate_pawn_moves(const Position& pos, std::vector<Move>& moves) {
+void generate_pawn_moves(const Position& pos, MoveList& moves) {
     const Color    us    = pos.side_to_move;
     const Bitboard empty = ~pos.occupied;
     const Bitboard enemy = pos.colors[Color(us ^ 1)];
@@ -110,7 +110,7 @@ bool is_square_attacked(const Position& pos, Square sq, Color by) {
     return false;
 }
 
-void generate_castling(const Position& pos, std::vector<Move>& moves) {
+void generate_castling(const Position& pos, MoveList& moves) {
     const Color    us   = pos.side_to_move;
     const Color    them = Color(us ^ 1);
     const Bitboard occ  = pos.occupied;
@@ -139,7 +139,7 @@ void generate_castling(const Position& pos, std::vector<Move>& moves) {
     }
 }
 
-void generate_slider_moves(const Position& pos, std::vector<Move>& moves) {
+void generate_slider_moves(const Position& pos, MoveList& moves) {
     const Color    us  = pos.side_to_move;
     const Bitboard our = pos.colors[us];
     const Bitboard occ = pos.occupied;
@@ -187,7 +187,7 @@ bool in_check(const Position& pos) {
                               Color(pos.side_to_move ^ 1));
 }
 
-void generate_moves(Position& pos, std::vector<Move>& moves) {
+void generate_moves(Position& pos, MoveList& moves) {
     const Color    us         = pos.side_to_move;
     const Bitboard our_pieces = pos.colors[us];
     Bitboard       knights    = pos.pieces[us][KNIGHT];

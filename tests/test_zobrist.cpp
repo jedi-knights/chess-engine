@@ -28,7 +28,7 @@ TEST_CASE("key returns to original after make/unmake across generated moves") {
         REQUIRE(pos.set_from_fen(fen));
         const uint64_t before = pos.key;
 
-        std::vector<Move> moves;
+        MoveList moves;
         generate_moves(pos, moves);
         for (Move m : moves) {
             UndoInfo u;
@@ -64,7 +64,7 @@ TEST_CASE("side_to_move flip changes the key predictably") {
 TEST_CASE("transpositions produce the same key") {
     // 1.Nf3 Nc6 2.Nc3 Nf6 and 1.Nc3 Nc6 2.Nf3 Nf6 reach the same board
     // via different move orders — Zobrist keys must match.
-    auto play_sequence = [](const std::vector<Move>& seq) {
+    auto play_sequence = [](const MoveList& seq) {
         Position pos;
         REQUIRE(pos.set_from_fen(STARTPOS_FEN));
         UndoInfo u;

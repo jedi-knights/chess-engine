@@ -17,7 +17,7 @@ TEST_CASE("make_move then unmake_move restores identical FEN across generated mo
         REQUIRE(pos.set_from_fen(fen));
         const std::string before = pos.to_fen();
 
-        std::vector<Move> moves;
+        MoveList moves;
         generate_moves(pos, moves);
 
         for (Move m : moves) {
@@ -36,7 +36,7 @@ TEST_CASE("nested make/unmake at depth 3 restores FEN") {
     auto walk = [](auto& self, Position& pos, int depth) -> void {
         if (depth == 0) return;
         const std::string before = pos.to_fen();
-        std::vector<Move> moves;
+        MoveList moves;
         generate_moves(pos, moves);
         for (Move m : moves) {
             UndoInfo u;
@@ -58,7 +58,7 @@ TEST_CASE("nested make/unmake at depth 3 restores FEN") {
 TEST_CASE("pawn: double push generates the correct destination and ep pairing") {
     Position pos;
     REQUIRE(pos.set_from_fen(STARTPOS_FEN));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     for (int f = 0; f < 8; ++f) {
         Square from    = make_square(File(f), RANK_2);
@@ -73,7 +73,7 @@ TEST_CASE("pawn: double push generates the correct destination and ep pairing") 
 TEST_CASE("pawn: en passant emitted only when ep_square is set and reachable") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(E5, D6, MT_EN_PASSANT)));
 
@@ -87,7 +87,7 @@ TEST_CASE("pawn: en passant emitted only when ep_square is set and reachable") {
 TEST_CASE("pawn: promotion fan-out emits all four piece types (push and capture)") {
     Position push_pos;
     REQUIRE(push_pos.set_from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(push_pos, moves);
     for (PieceType pt : {QUEEN, ROOK, BISHOP, KNIGHT}) {
         INFO("push-promotion piece: " << int(pt));
@@ -107,7 +107,7 @@ TEST_CASE("pawn: promotion fan-out emits all four piece types (push and capture)
 TEST_CASE("pawn: single push blocked by any piece (own or enemy)") {
     Position blocked;
     REQUIRE(blocked.set_from_fen("4k3/8/8/8/8/4N3/4P3/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(blocked, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E2, E3)));
     CHECK_FALSE(contains_move(moves, ::make_move(E2, E4)));
@@ -122,7 +122,7 @@ TEST_CASE("pawn: single push blocked by any piece (own or enemy)") {
 TEST_CASE("pawn: file-wrap guard — a-file pawn has no NW capture, h-file no NE") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/8/7p/P6P/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(A2, H2)));
     CHECK_FALSE(contains_move(moves, ::make_move(H2, A3)));
@@ -133,7 +133,7 @@ TEST_CASE("pawn: file-wrap guard — a-file pawn has no NW capture, h-file no NE
 TEST_CASE("slider: rook on empty board covers 14 squares from d4") {
     Position pos;
     REQUIRE(pos.set_from_fen("k7/8/8/8/3R4/8/8/7K w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(count_moves_from(moves, D4) == 14);
     CHECK(contains_move(moves, ::make_move(D4, D8)));
@@ -146,7 +146,7 @@ TEST_CASE("slider: rook on empty board covers 14 squares from d4") {
 TEST_CASE("slider: bishop on empty board covers 13 squares from d4") {
     Position pos;
     REQUIRE(pos.set_from_fen("k7/8/8/8/3B4/8/8/7K w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(count_moves_from(moves, D4) == 13);
     CHECK(contains_move(moves, ::make_move(D4, H8)));
@@ -159,7 +159,7 @@ TEST_CASE("slider: bishop on empty board covers 13 squares from d4") {
 TEST_CASE("slider: queen on empty board covers 27 squares from d4 (14+13)") {
     Position pos;
     REQUIRE(pos.set_from_fen("k7/8/8/8/3Q4/8/8/7K w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(count_moves_from(moves, D4) == 27);
 }
@@ -167,7 +167,7 @@ TEST_CASE("slider: queen on empty board covers 27 squares from d4 (14+13)") {
 TEST_CASE("slider: own piece blocks, ray stops before the blocker") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/P7/8/8/R3K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(A1, A2)));
     CHECK(contains_move(moves, ::make_move(A1, A3)));
@@ -178,7 +178,7 @@ TEST_CASE("slider: own piece blocks, ray stops before the blocker") {
 TEST_CASE("slider: enemy piece is captured and ray stops") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/p7/8/8/R3K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(A1, A2)));
     CHECK(contains_move(moves, ::make_move(A1, A3)));
@@ -191,7 +191,7 @@ TEST_CASE("slider: enemy piece is captured and ray stops") {
 TEST_CASE("castling: both moves emitted when position is clean") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
     CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
@@ -200,7 +200,7 @@ TEST_CASE("castling: both moves emitted when position is clean") {
 TEST_CASE("castling: missing right suppresses that side's move") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/R3K2R w Q - 0 1"));  // OOO only
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
     CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
@@ -209,7 +209,7 @@ TEST_CASE("castling: missing right suppresses that side's move") {
 TEST_CASE("castling: squares between king and rook must be empty") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/RN2KB1R w KQ - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
     CHECK_FALSE(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
@@ -218,7 +218,7 @@ TEST_CASE("castling: squares between king and rook must be empty") {
 TEST_CASE("castling: king in check disallows either side") {
     Position pos;
     REQUIRE(pos.set_from_fen("4r3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
     CHECK_FALSE(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
@@ -227,7 +227,7 @@ TEST_CASE("castling: king in check disallows either side") {
 TEST_CASE("castling: transit square attack disallows only that side") {
     Position pos;
     REQUIRE(pos.set_from_fen("5r2/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
     CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
@@ -236,7 +236,7 @@ TEST_CASE("castling: transit square attack disallows only that side") {
 TEST_CASE("castling: b1 attack does NOT disallow queenside (king doesn't pass through)") {
     Position pos;
     REQUIRE(pos.set_from_fen("1r2k3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
     CHECK(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
@@ -245,7 +245,7 @@ TEST_CASE("castling: b1 attack does NOT disallow queenside (king doesn't pass th
 TEST_CASE("castling: black castles both sides symmetrically") {
     Position pos;
     REQUIRE(pos.set_from_fen("r3k2r/8/8/8/8/8/8/4K3 b kq - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(E8, G8, MT_CASTLING)));
     CHECK(contains_move(moves, ::make_move(E8, C8, MT_CASTLING)));
@@ -258,7 +258,7 @@ TEST_CASE("legality: king cannot move into a square attacked by an enemy piece")
     // to d1 or d2 only if those aren't attacked — but they are.
     Position pos;
     REQUIRE(pos.set_from_fen("3r4/8/8/8/8/8/8/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E1, D1)));
     CHECK_FALSE(contains_move(moves, ::make_move(E1, D2)));
@@ -273,7 +273,7 @@ TEST_CASE("legality: pinned piece cannot move off the pin line") {
     // moves off the e-file leave the king in check → filtered.
     Position pos;
     REQUIRE(pos.set_from_fen("4r3/8/8/8/8/8/4B3/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     // Every bishop move from e2 leaves the e-file (bishops only move diagonally),
     // so all bishop moves are pinned out.
@@ -285,7 +285,7 @@ TEST_CASE("legality: pinned piece CAN move along the pin line (incl. capture pin
     // rook can still move along the e-file, including capturing the pinner.
     Position pos;
     REQUIRE(pos.set_from_fen("4r3/8/8/4R3/8/8/8/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(contains_move(moves, ::make_move(E5, E6)));      // along pin
     CHECK(contains_move(moves, ::make_move(E5, E7)));      // along pin
@@ -301,7 +301,7 @@ TEST_CASE("legality: king in check must address the check") {
     // isn't reachable). No other piece exists to block or capture.
     Position pos;
     REQUIRE(pos.set_from_fen("4r3/8/8/8/8/8/8/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK_FALSE(contains_move(moves, ::make_move(E1, E2)));  // still on e-file
     CHECK(contains_move(moves, ::make_move(E1, D1)));
@@ -316,7 +316,7 @@ TEST_CASE("legality: checkmate produces zero legal moves") {
     // black rook on f1 delivering check along the 1st rank.
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/6PP/5r1K w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(moves.empty());
 }
@@ -327,7 +327,7 @@ TEST_CASE("legality: stalemate produces zero legal moves and is NOT checkmate") 
     // pawn on e2. Classic king-and-pawn stalemate shape.
     Position pos;
     REQUIRE(pos.set_from_fen("8/8/8/8/8/4k3/4p3/4K3 w - - 0 1"));
-    std::vector<Move> moves;
+    MoveList moves;
     generate_moves(pos, moves);
     CHECK(moves.empty());
 }

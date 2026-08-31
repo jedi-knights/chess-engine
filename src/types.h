@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <initializer_list>
 
 using Bitboard = uint64_t;
 
@@ -69,3 +70,33 @@ constexpr MoveType  move_type(Move m)      { return MoveType((m >> 14) & 3); }
 constexpr PieceType move_promotion(Move m) { return PieceType(((m >> 12) & 3) + KNIGHT); }
 
 constexpr Move NULL_MOVE = 0;
+
+// Fixed-capacity move container — replaces std::vector<Move> in the hot
+// path so search nodes don't malloc/free per call. Chess has a proven
+// upper bound of 218 legal moves in any position; 256 rounds up comfortably.
+struct MoveList {
+    static constexpr int MAX_MOVES = 256;
+    Move moves[MAX_MOVES];
+    int  count = 0;
+
+    MoveList() = default;
+    // Enables `MoveList{move1, move2, ...}` construction — convenient
+    // for tests that hand-craft short move sequences.
+    MoveList(std::initializer_list<Move> il) {
+        for (Move m : il) moves[count++] = m;
+    }
+
+    void push_back(Move m)                 { moves[count++] = m; }
+    int  size()  const                     { return count; }
+    bool empty() const                     { return count == 0; }
+    void clear()                           { count = 0; }
+    Move&       operator[](int i)          { return moves[i]; }
+    const Move& operator[](int i) const    { return moves[i]; }
+    Move*       begin()                    { return moves; }
+    Move*       end()                      { return moves + count; }
+    const Move* begin() const              { return moves; }
+    const Move* end()   const              { return moves + count; }
+    // Erase-tail: used with std::remove_if. `first` must lie within
+    // moves; `last` is ignored (interpreted as end()).
+    void erase(Move* first, Move* /*last*/) { count = int(first - moves); }
+};
