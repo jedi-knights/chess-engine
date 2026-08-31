@@ -6,24 +6,63 @@
 #include "types.h"
 
 #include <algorithm>
+#include <atomic>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
 
+// Search thread state. `g_stop` is polled by search on the same 1024-
+// node cadence as the time-up check; `g_search_thread` is the worker
+// running the current search (may or may not be joinable); `g_out_mutex`
+// serializes writes to `out` since the search thread emits info lines
+// while the main loop might also print.
+std::atomic<bool> g_stop{false};
+std::thread       g_search_thread;
+std::mutex        g_out_mutex;
+
+// Send a chunk of output atomically. All writes to `out` (main-thread
+// commands AND background info/bestmove lines) go through this so an
+// info line never gets interleaved with an isready reply.
+void emit(std::ostream& out, const std::string& msg) {
+    std::lock_guard<std::mutex> lg(g_out_mutex);
+    out << msg << std::flush;
+}
+
+// Cancel any active search, wait for it to finish. Called before starting
+// a new search, on `stop`, and during `quit` / EOF cleanup so no thread
+// outlives its `out` reference.
+void wait_for_search() {
+    if (g_search_thread.joinable()) {
+        g_stop.store(true, std::memory_order_relaxed);
+        g_search_thread.join();
+    }
+    g_stop.store(false, std::memory_order_relaxed);
+}
+
 void cmd_uci(std::ostream& out) {
-    out << "id name jedi-engine 0.0.1\n"
-        << "id author omar\n"
-        << "uciok\n" << std::flush;
+    emit(out,
+         "id name jedi-engine 0.0.1\n"
+         "id author omar\n"
+         "uciok\n");
 }
 
 void cmd_isready(std::ostream& out) {
-    out << "readyok\n" << std::flush;
+    emit(out, "readyok\n");
 }
 
 void cmd_position(std::istringstream& is, Position& pos) {
+    // A `position` command mid-search would race with the running search's
+    // read of `pos` (the search thread copies pos, so it's safe on the
+    // search's side, but the semantics of "search this old position, then
+    // report on the new position" are useless to any real GUI). Cancel
+    // and drop any pending bestmove.
+    wait_for_search();
+
     std::string token;
     is >> token;
     if (token == "startpos") {
@@ -37,10 +76,6 @@ void cmd_position(std::istringstream& is, Position& pos) {
         }
         pos.set_from_fen(fen);
     }
-    // Trailing `moves e2e4 e7e5 ...`: parse each token, verify it's in
-    // the legal-move list, apply. Any parse failure or illegal move
-    // stops processing — safer than trusting the GUI blindly, since a
-    // malformed token could otherwise trigger a make_move assertion.
     if (token != "moves") return;
     while (is >> token) {
         Move m = parse_uci_move(pos, token);
@@ -49,7 +84,7 @@ void cmd_position(std::istringstream& is, Position& pos) {
         generate_moves(pos, legal);
         if (std::find(legal.begin(), legal.end(), m) == legal.end()) return;
         UndoInfo u;
-        pos.make_move(m, u);  // UndoInfo discarded — moves are cumulative
+        pos.make_move(m, u);
     }
 }
 
@@ -57,47 +92,33 @@ void cmd_position(std::istringstream& is, Position& pos) {
 // `movetime`. Small enough to finish in well under a second even in a
 // debug build.
 constexpr int DEFAULT_DEPTH = 4;
-// When the GUI specifies `movetime` (or clock args) but no explicit
-// depth, iterative deepening runs until time is up — cap at a depth
-// that would take well beyond any practical think-time on this engine.
+// When the GUI specifies `movetime`, clock args, or `infinite` but no
+// explicit depth, iterative deepening runs until stopped externally —
+// cap at a depth that would take well beyond any practical think-time.
 constexpr int MOVETIME_MAX_DEPTH = 64;
 
-// Compute how long to spend on this move given the clock. Uses the
-// classical divisor approach: budget ≈ remaining / (movestogo + slack),
-// plus most of the increment (which is "free" — it refills the clock).
-// Under sudden death (movestogo == 0), guess ~30 more moves ahead.
-//
-// Safety margins are conservative — losing on time is a categorical
-// failure and the search's own polling granularity (1024 nodes) plus
-// scheduler latency can easily overshoot the deadline by 10-50 ms.
 int compute_movetime(int remaining_ms, int increment_ms, int movestogo) {
     constexpr int SAFETY_BUFFER_MS = 100;
     int budget = remaining_ms - SAFETY_BUFFER_MS;
-    if (budget <= 0) return 1;                     // out of time — play instantly
+    if (budget <= 0) return 1;
 
     int moves_left = (movestogo > 0) ? movestogo : 30;
-    int base       = budget / (moves_left + 2);   // +2 keeps some in reserve
-
-    // Increments come back after the move, so spending them doesn't
-    // shrink the clock — take most of the increment on every move.
+    int base       = budget / (moves_left + 2);
     int inc        = (increment_ms * 3) / 4;
-
     int movetime   = base + inc;
-
-    // Hard cap: never spend more than a third of remaining time on one
-    // move, even under aggressive time controls or slow-search bugs.
     int hard_cap   = budget / 3;
     if (movetime > hard_cap) movetime = hard_cap;
-
-    // Floor at a few ms so search always runs at least depth 1 (which
-    // guarantees a legal bestmove for the UCI contract).
     if (movetime < 5)        movetime = 5;
     return movetime;
 }
 
-void cmd_go(std::istringstream& is, Position& pos, std::ostream& out) {
+void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
+    // Cancel any prior search before starting a new one. Its bestmove
+    // (if it managed to emit one before the cancel) has already gone out.
+    wait_for_search();
+
     SearchLimits limits;
-    bool depth_set = false, movetime_set = false;
+    bool depth_set = false, movetime_set = false, infinite = false;
     int  wtime = 0, btime = 0, winc = 0, binc = 0, movestogo = 0;
     bool clock_given = false;
 
@@ -116,31 +137,62 @@ void cmd_go(std::istringstream& is, Position& pos, std::ostream& out) {
         else if (token == "winc")      { next_int(winc); }
         else if (token == "binc")      { next_int(binc); }
         else if (token == "movestogo") { next_int(movestogo); }
-        // TODO: `infinite`, `nodes`, `mate` — later.
+        else if (token == "infinite")  { infinite = true; }
     }
 
-    // Explicit movetime wins over clock-derived time (both may be set;
-    // GUIs sometimes send both for redundancy). Only fall back to clock
-    // computation when the GUI didn't specify a fixed movetime.
     if (!movetime_set && clock_given) {
         int remaining = (pos.side_to_move == WHITE) ? wtime : btime;
         int increment = (pos.side_to_move == WHITE) ? winc  : binc;
         limits.movetime_ms = compute_movetime(remaining, increment, movestogo);
     }
 
-    if (!depth_set) {
+    if (infinite) {
+        // `infinite` disables all natural stop conditions — search runs
+        // until `stop` fires the external cancellation.
+        if (!depth_set) limits.max_depth = MOVETIME_MAX_DEPTH;
+        limits.movetime_ms = 0;
+    } else if (!depth_set) {
         limits.max_depth = (limits.movetime_ms > 0) ? MOVETIME_MAX_DEPTH : DEFAULT_DEPTH;
     }
 
-    SearchResult r = search_iterative(pos, limits,
-        [&](const SearchResult& iter) {
-            out << "info depth " << iter.depth
-                << " score cp "  << iter.score
-                << " nodes "     << iter.nodes
-                << " pv "        << move_to_uci(iter.best_move)
-                << "\n" << std::flush;
+    g_stop.store(false, std::memory_order_relaxed);
+    limits.external_stop = &g_stop;
+
+    // Copy pos into the thread — the main loop keeps its own reference
+    // for future commands, and detaching decouples the two.
+    Position pos_copy = pos;
+    std::ostream* out_ptr = &out;
+
+    g_search_thread = std::thread(
+        [pos_copy = std::move(pos_copy), limits, out_ptr]() mutable {
+            SearchResult r = search_iterative(pos_copy, limits,
+                [&](const SearchResult& iter) {
+                    std::ostringstream line;
+                    line << "info depth " << iter.depth
+                         << " score cp "  << iter.score
+                         << " nodes "     << iter.nodes
+                         << " pv "        << move_to_uci(iter.best_move)
+                         << "\n";
+                    emit(*out_ptr, line.str());
+                });
+            emit(*out_ptr, "bestmove " + move_to_uci(r.best_move) + "\n");
         });
-    out << "bestmove " << move_to_uci(r.best_move) << "\n" << std::flush;
+
+    // Non-infinite `go` waits synchronously — the search has a natural
+    // stop condition (depth or movetime) so blocking here matches
+    // pre-async behavior and gives GUIs a bestmove-before-return
+    // guarantee. `go infinite` doesn't have a natural terminator: we
+    // return immediately and rely on a subsequent `stop` to end the
+    // search.
+    if (!infinite && g_search_thread.joinable()) {
+        g_search_thread.join();
+    }
+}
+
+void cmd_stop() {
+    // Signals the search to stop; join guarantees the bestmove has been
+    // emitted before we return control to the loop.
+    wait_for_search();
 }
 
 }  // namespace
@@ -156,11 +208,17 @@ void uci_loop(std::istream& in, std::ostream& out) {
         is >> cmd;
         if      (cmd == "uci")        cmd_uci(out);
         else if (cmd == "isready")    cmd_isready(out);
-        else if (cmd == "ucinewgame") { pos.set_from_fen(STARTPOS_FEN);
+        else if (cmd == "ucinewgame") { wait_for_search();
+                                        pos.set_from_fen(STARTPOS_FEN);
                                         clear_transposition_table(); }
         else if (cmd == "position")   cmd_position(is, pos);
         else if (cmd == "go")         cmd_go(is, pos, out);
-        else if (cmd == "d")          out << pos.pretty() << std::flush;
+        else if (cmd == "stop")       cmd_stop();
+        else if (cmd == "d")          { wait_for_search();
+                                        emit(out, pos.pretty()); }
         else if (cmd == "quit")       break;
     }
+    // EOF or `quit`: drain any pending search so its writes to `out`
+    // complete before `out` (typically a caller-owned stream) is torn down.
+    wait_for_search();
 }

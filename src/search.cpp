@@ -61,13 +61,17 @@ struct SearchContext {
     int  history[NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES] = {};
 };
 
-// Poll the wall clock every ~1024 nodes. Checking on every node makes
-// clock_gettime dominate short searches; the granularity chosen keeps
-// syscall overhead under ~1% while still stopping within a millisecond
-// or two of the movetime target.
-bool time_up(SearchContext& ctx) {
-    if (ctx.limits.movetime_ms == 0)   return false;
-    if ((ctx.nodes & 0x3FF) != 0)      return false;
+// Poll for cancellation reasons every ~1024 nodes. Both the wall-clock
+// deadline and the external `stop` flag use this cadence; on every-node
+// checks the syscall/atomic-load overhead would dominate the search on
+// short movetimes.
+bool should_stop(SearchContext& ctx) {
+    if ((ctx.nodes & 0x3FF) != 0) return false;
+    if (ctx.limits.external_stop &&
+        ctx.limits.external_stop->load(std::memory_order_relaxed)) {
+        return true;
+    }
+    if (ctx.limits.movetime_ms == 0) return false;
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         Clock::now() - ctx.start).count();
     return elapsed_ms >= ctx.limits.movetime_ms;
@@ -159,7 +163,7 @@ void order_moves(const Position& pos, std::vector<Move>& moves,
 // and let the recursion resolve the check.
 int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     ++ctx.nodes;
-    if (ctx.stopped || time_up(ctx)) { ctx.stopped = true; return 0; }
+    if (ctx.stopped || should_stop(ctx)) { ctx.stopped = true; return 0; }
 
     const bool checked = in_check(pos);
 
@@ -208,7 +212,7 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
 int negamax(Position& pos, int depth, int alpha, int beta,
             int ply, SearchContext& ctx) {
     ++ctx.nodes;
-    if (ctx.stopped || time_up(ctx)) { ctx.stopped = true; return 0; }
+    if (ctx.stopped || should_stop(ctx)) { ctx.stopped = true; return 0; }
     // Leaf: hand off to quiescence rather than static-evaluating a
     // position that may be mid-exchange. See qsearch for the rationale.
     if (depth == 0) return qsearch(pos, alpha, beta, ply, ctx);
@@ -304,7 +308,14 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
         pos.make_move(m, u);
         int score = -negamax(pos, depth - 1, -INF, -alpha, 1, ctx);
         pos.unmake_move(m, u);
-        if (ctx.stopped) return false;
+        if (ctx.stopped) {
+            // Cancelled mid-iteration. Preserve whatever `best_move` we
+            // found so far — the caller can salvage it as a partial
+            // result. If we hadn't finished any move yet, best_move
+            // stays NULL_MOVE and the fallback in search_iterative
+            // picks the first legal move.
+            return false;
+        }
         if (score > best)  { best = score; best_move = m; }
         if (score > alpha) alpha = score;
     }
@@ -343,14 +354,29 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
     for (int d = 1; d <= limits.max_depth; ++d) {
         SearchResult r;
         bool completed = search_root(pos, d, ctx, r);
-        // Guarantee at least the depth-1 result even if movetime is
-        // absurdly short — a "no move" bestmove would violate the UCI
-        // contract with the GUI.
+        // For d > 1, only accept fully-completed iterations — a
+        // partial deeper result is unreliable (best-move might come
+        // from a losing subtree we hadn't refuted yet).
         if (!completed && d > 1) break;
         r.nodes = ctx.nodes;
         best = r;
         if (on_iter) on_iter(best);
         if (ctx.stopped) break;
+    }
+
+    // Final guarantee: bestmove must be a legal move if any exist.
+    // A stop signal arriving before d=1 completes a single root move
+    // can leave best.best_move as NULL_MOVE despite legal moves being
+    // available. Fall back to the first legal move so the UCI contract
+    // holds. (Genuine mate/stalemate → generate_moves is empty → keep
+    // NULL_MOVE, which serializes as "0000" per protocol.)
+    if (best.best_move == NULL_MOVE) {
+        std::vector<Move> moves;
+        generate_moves(pos, moves);
+        if (!moves.empty()) {
+            best.best_move = moves[0];
+            if (best.depth == 0) best.depth = 1;
+        }
     }
     return best;
 }

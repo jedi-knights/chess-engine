@@ -2,6 +2,7 @@
 #include "position.h"
 #include "types.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 
@@ -15,6 +16,11 @@ struct SearchResult {
 struct SearchLimits {
     int max_depth   = 64;   // hard ceiling — search never exceeds this
     int movetime_ms = 0;    // 0 = no time limit; stops mid-iteration when reached
+    // External stop signal — polled on the same cadence as the movetime
+    // deadline. Non-null enables UCI `stop` handling and `go infinite`;
+    // caller owns the atomic and is responsible for its lifetime being
+    // at least as long as the search.
+    std::atomic<bool>* external_stop = nullptr;
 };
 
 using InfoCallback = std::function<void(const SearchResult&)>;

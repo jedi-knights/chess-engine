@@ -53,7 +53,7 @@ Currently implemented (all 8 milestones complete):
 - Perft driver and 6-position standard test suite
 - Material evaluation with **piece-square tables** (Simplified Evaluation Function values) and **tapered eval** — king PST interpolates linearly between middlegame (safety) and endgame (centralization) tables by remaining non-pawn material. Score in centipawns from side-to-move perspective.
 - **Iterative-deepening negamax with alpha-beta pruning** + **quiescence search** at leaves (extends captures until quiet, resolves horizon-effect blunders) + **MVV-LVA move ordering** + **Zobrist-hashed transposition table** (~1M entries, EXACT/LOWER/UPPER bounds, mate-score ply adjustment) + **killer moves and history heuristic** (order quiet-move beta-cutoffs first); ~11.6× speedup over baseline alpha-beta at depth 6; supports `go movetime N` with mid-iteration cancellation (any-time property); `ucinewgame` clears the TT
-- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`, `d`, `quit`) with per-iteration `info` lines and `bestmove` output
+- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`/`infinite`, `stop`, `d`, `quit`) with per-iteration `info` lines and `bestmove` output; `go infinite` runs asynchronously so the engine keeps reading commands
 - doctest unit test suite (64 cases) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
 Post-roadmap ideas (see CLAUDE.md): iterative deepening + time management, move ordering (MVV-LVA / killers / history), quiescence search, transposition table with Zobrist hashing, magic bitboards, piece-square tables, `position ... moves e2e4 ...` UCI extension.
@@ -94,6 +94,7 @@ The `go` command runs iterative-deepening alpha-beta search. Supported forms:
 - `go depth N` — search to a fixed depth
 - `go movetime N` — search until N milliseconds elapse (any-time; deepest completed iteration wins)
 - `go wtime W btime B [winc I] [binc I] [movestogo N]` — derive movetime from the clock for the side to move. Sudden death (no `movestogo`) assumes ~30 more moves. Increment is spent generously since it refills the clock.
+- `go infinite` — search until `stop`. Runs asynchronously on a background thread; the engine keeps reading commands.
 - `go` (no args) — default depth 4
 
 Each completed depth emits a UCI `info` line with depth, centipawn score, node count, and the root move as PV, followed by `bestmove`.

@@ -101,6 +101,52 @@ TEST_CASE("go depth 1 reports depth 1 in info line") {
     CHECK_FALSE(contains(out, "info depth 2"));
 }
 
+TEST_CASE("go infinite runs asynchronously; stop returns bestmove") {
+    // `go infinite` has no natural terminator — cmd_go must return
+    // immediately so the loop can process the subsequent `stop`. The
+    // stop handler then joins the search thread and its bestmove has
+    // already been emitted from the thread's exit path.
+    std::string out = run_session(
+        "position startpos\n"
+        "go infinite\n"
+        "stop\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+    // At least one iteration should have completed before stop landed
+    // (depth 1 on startpos is ~microseconds); if the info line is
+    // missing, either the search didn't start or the stop check is
+    // firing on the wrong condition.
+    CHECK(contains(out, "info depth "));
+}
+
+TEST_CASE("stop with no active search is a no-op") {
+    // A GUI can send stop after bestmove has already been emitted — the
+    // engine should just ignore it, not crash on a joined thread.
+    std::string out = run_session("stop\nquit\n");
+    CHECK(out.empty());
+}
+
+TEST_CASE("multiple go infinite + stop cycles work in one session") {
+    // Second `go infinite` after the first has been stopped must start
+    // a fresh search, not inherit stopped=true from the previous cycle.
+    std::string out = run_session(
+        "position startpos\n"
+        "go infinite\n"
+        "stop\n"
+        "go infinite\n"
+        "stop\n"
+        "quit\n");
+    // Two bestmoves — one per go/stop pair.
+    int bestmove_count = 0;
+    size_t p = 0;
+    while ((p = out.find("bestmove ", p)) != std::string::npos) {
+        ++bestmove_count;
+        p += 9;
+    }
+    CHECK(bestmove_count == 2);
+}
+
 TEST_CASE("go movetime completes within the deadline with a legal move") {
     // Movetime alone (no explicit depth) → iterative deepening searches
     // deeper and deeper until the deadline. Must always return a legal move.
