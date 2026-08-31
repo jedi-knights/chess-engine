@@ -49,10 +49,12 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 
 ## Post-roadmap next steps (each is an independent PR)
 
-- Iterative deepening (`go movetime` / `go infinite` support)
-- Move ordering (MVV-LVA, killers, history) — currently O(branching^depth) with no ordering
-- Quiescence search — stop only at "quiet" leaves to avoid horizon-effect blunders on captures
-- Transposition table (Zobrist hashing)
+- ✅ Iterative deepening + `go movetime N` (any-time property, per-iteration `info` output). `search_best(pos, depth)` is preserved as a primitive; `search_iterative(pos, limits, callback)` is the production entry point.
+- Move ordering (MVV-LVA, killers, history) — currently O(branching^depth) with no ordering, so ID re-searches waste effort
+- Quiescence search — stop only at "quiet" leaves to avoid horizon-effect blunders on captures (score oscillates ±100 at successive depths without it)
+- `go infinite` + `stop` (needs an async cancellation signal, not just a deadline)
+- `go wtime W btime B` — compute movetime from remaining clock
+- Transposition table (Zobrist hashing) — ID benefits most from this since re-searches hit the same nodes
 - Magic bitboards for slider attacks
 - Piece-square tables in eval
 - UCI `position ... moves e2e4 ...` — needs a `parse_uci_move` helper

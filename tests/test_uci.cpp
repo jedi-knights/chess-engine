@@ -56,16 +56,32 @@ TEST_CASE("ucinewgame resets to startpos after loading a different position") {
     CHECK(contains(out, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"));
 }
 
-TEST_CASE("go emits an info line and a bestmove line") {
-    // UCI contract: `go` must produce `bestmove <move>` so the GUI doesn't
-    // hang. After milestone 8 it also produces an `info` line (depth,
-    // score, nodes, pv) before the bestmove.
-    std::string out = run_session("position startpos\ngo depth 2\nquit\n");
+// Count how many lines in `haystack` start with `prefix`. Used to verify
+// iterative deepening emits one info line per completed depth rather than
+// one summary line.
+static int count_lines_starting(const std::string& haystack, const std::string& prefix) {
+    int n = 0;
+    size_t pos = 0;
+    while (pos < haystack.size()) {
+        if (haystack.compare(pos, prefix.size(), prefix) == 0) ++n;
+        size_t nl = haystack.find('\n', pos);
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return n;
+}
+
+TEST_CASE("go emits one info line per iteration plus a bestmove") {
+    // Iterative deepening: `go depth 3` runs depth 1, 2, 3 and emits an
+    // info line after each — so a GUI can display live progress.
+    std::string out = run_session("position startpos\ngo depth 3\nquit\n");
+    CHECK(contains(out, "info depth 1"));
     CHECK(contains(out, "info depth 2"));
+    CHECK(contains(out, "info depth 3"));
+    CHECK(count_lines_starting(out, "info depth ") == 3);
     CHECK(contains(out, "score cp "));
     CHECK(contains(out, "nodes "));
     CHECK(contains(out, "bestmove "));
-    // Bestmove must not be the null-move sentinel — startpos has 20 legal moves.
     CHECK_FALSE(contains(out, "bestmove 0000"));
 }
 
@@ -78,9 +94,19 @@ TEST_CASE("go on a mated position emits bestmove 0000") {
     CHECK(contains(out, "bestmove 0000"));
 }
 
-TEST_CASE("go depth parameter controls search depth reported in info") {
+TEST_CASE("go depth 1 reports depth 1 in info line") {
     std::string out = run_session("position startpos\ngo depth 1\nquit\n");
     CHECK(contains(out, "info depth 1"));
+    // No deeper iterations — depth 1 is the ceiling.
+    CHECK_FALSE(contains(out, "info depth 2"));
+}
+
+TEST_CASE("go movetime completes within the deadline with a legal move") {
+    // Movetime alone (no explicit depth) → iterative deepening searches
+    // deeper and deeper until the deadline. Must always return a legal move.
+    std::string out = run_session("position startpos\ngo movetime 100\nquit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
 }
 
 TEST_CASE("quit alone terminates the loop without output") {

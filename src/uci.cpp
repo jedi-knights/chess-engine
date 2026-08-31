@@ -55,31 +55,41 @@ void cmd_position(std::istringstream& is, Position& pos) {
     while (is >> token) { /* drain */ }
 }
 
-// Search depth used when the GUI doesn't specify one. Small enough that
-// every response comes back in under a second even in debug builds; the
-// engine currently has no time management or iterative deepening.
+// Default depth ceiling when the GUI specifies neither `depth` nor
+// `movetime`. Small enough to finish in well under a second even in a
+// debug build.
 constexpr int DEFAULT_DEPTH = 4;
+// When the GUI specifies `movetime` but no explicit depth, iterative
+// deepening runs until time is up — cap at a depth that would take
+// well beyond any practical think-time on this engine's speed.
+constexpr int MOVETIME_MAX_DEPTH = 64;
 
 void cmd_go(std::istringstream& is, Position& pos, std::ostream& out) {
-    int depth = DEFAULT_DEPTH;
+    SearchLimits limits;
+    bool depth_set = false, movetime_set = false;
     std::string token;
     while (is >> token) {
         if (token == "depth" && (is >> token)) {
-            try { depth = std::stoi(token); }
-            catch (...) { depth = DEFAULT_DEPTH; }
+            try { limits.max_depth = std::stoi(token); depth_set = true; }
+            catch (...) { /* ignore malformed value, keep default */ }
+        } else if (token == "movetime" && (is >> token)) {
+            try { limits.movetime_ms = std::stoi(token); movetime_set = true; }
+            catch (...) { /* ignore malformed value */ }
         }
-        // TODO: movetime, wtime/btime, infinite — later.
+        // TODO: wtime/btime, infinite — later.
+    }
+    if (!depth_set) {
+        limits.max_depth = movetime_set ? MOVETIME_MAX_DEPTH : DEFAULT_DEPTH;
     }
 
-    SearchResult r = search_best(pos, depth);
-    // UCI info line — the GUI shows this in its search-info panel. `pv`
-    // is only the root move for now (no PV extraction yet); UCI permits
-    // that, and it's honest about what the engine actually knows.
-    out << "info depth " << r.depth
-        << " score cp "  << r.score
-        << " nodes "     << r.nodes
-        << " pv "        << move_to_uci(r.best_move)
-        << "\n";
+    SearchResult r = search_iterative(pos, limits,
+        [&](const SearchResult& iter) {
+            out << "info depth " << iter.depth
+                << " score cp "  << iter.score
+                << " nodes "     << iter.nodes
+                << " pv "        << move_to_uci(iter.best_move)
+                << "\n" << std::flush;
+        });
     out << "bestmove " << move_to_uci(r.best_move) << "\n" << std::flush;
 }
 

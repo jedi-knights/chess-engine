@@ -10,6 +10,7 @@
 #include "position.h"
 #include "search.h"
 
+#include <chrono>
 #include <vector>
 
 TEST_CASE("search returns a legal move for the starting position") {
@@ -85,4 +86,82 @@ TEST_CASE("search node count grows with depth") {
     SearchResult d3 = search_best(pos, 3);
     CHECK(d1.nodes < d2.nodes);
     CHECK(d2.nodes < d3.nodes);
+}
+
+// --- Iterative deepening -----------------------------------------------
+
+TEST_CASE("iterative deepening reaches the requested max_depth") {
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    SearchLimits limits;
+    limits.max_depth = 3;
+    SearchResult r = search_iterative(pos, limits);
+    CHECK(r.depth == 3);
+    CHECK(r.best_move != NULL_MOVE);
+}
+
+TEST_CASE("iterative deepening fires callback once per completed depth") {
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    SearchLimits limits;
+    limits.max_depth = 4;
+
+    std::vector<int> depths_seen;
+    search_iterative(pos, limits, [&](const SearchResult& r) {
+        depths_seen.push_back(r.depth);
+    });
+
+    REQUIRE(depths_seen.size() == 4);
+    for (int i = 0; i < 4; ++i) CHECK(depths_seen[i] == i + 1);
+}
+
+TEST_CASE("iterative deepening accumulates nodes across iterations") {
+    // Each iteration re-searches from the root, so cumulative node count
+    // must strictly increase across callbacks.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    SearchLimits limits;
+    limits.max_depth = 3;
+
+    std::vector<uint64_t> node_snapshots;
+    search_iterative(pos, limits, [&](const SearchResult& r) {
+        node_snapshots.push_back(r.nodes);
+    });
+    REQUIRE(node_snapshots.size() == 3);
+    CHECK(node_snapshots[0] < node_snapshots[1]);
+    CHECK(node_snapshots[1] < node_snapshots[2]);
+}
+
+TEST_CASE("iterative deepening returns at least the depth-1 result") {
+    // Even with a 1 ms movetime — likely far too short to finish depth 1
+    // under ASan — the driver must still return a legal move so UCI's
+    // "bestmove is required" contract holds.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    SearchLimits limits;
+    limits.max_depth   = 8;
+    limits.movetime_ms = 1;   // absurdly short
+    SearchResult r = search_iterative(pos, limits);
+    CHECK(r.best_move != NULL_MOVE);
+    CHECK(r.depth >= 1);
+}
+
+TEST_CASE("iterative deepening honors movetime_ms as an upper bound") {
+    // A generous cap (2 seconds) that any startpos search finishes well
+    // within — the point of the assertion is that we don't run away past
+    // the deadline, not that we barely make it.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    SearchLimits limits;
+    limits.max_depth   = 64;    // would take forever without the time cap
+    limits.movetime_ms = 500;
+
+    auto start = std::chrono::steady_clock::now();
+    SearchResult r = search_iterative(pos, limits);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    CHECK(r.best_move != NULL_MOVE);
+    // Slack for the 1024-node polling granularity and doctest overhead.
+    CHECK(elapsed < 2000);
 }

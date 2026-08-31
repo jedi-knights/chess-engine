@@ -52,7 +52,7 @@ Currently implemented (all 8 milestones complete):
 - Precomputed leaper attack tables (knight, king, pawn)
 - Perft driver and 6-position standard test suite
 - Material evaluation (centipawns, from side-to-move perspective)
-- Fixed-depth **negamax with alpha-beta pruning**; distinguishes checkmate from stalemate; prefers shorter mates
+- **Iterative-deepening negamax with alpha-beta pruning**; distinguishes checkmate from stalemate; prefers shorter mates; supports `go movetime N` with mid-iteration cancellation (any-time property)
 - UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen]`, `go [depth N]`, `d`, `quit`) with `info` and `bestmove` output
 - doctest unit test suite (64 cases) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
@@ -89,7 +89,7 @@ quit
 
 Any UCI-compatible GUI (Arena, Cute Chess, Banksia, ChessBase) can drive it as an engine binary. Point the GUI at the compiled `./engine`.
 
-The `go` command runs a fixed-depth alpha-beta search (default depth 4; override with `go depth N`). Search returns a `bestmove` and a UCI `info` line with depth, centipawn score, node count, and the root move as PV.
+The `go` command runs iterative-deepening alpha-beta search. Default depth 4; override with `go depth N` or use `go movetime N` (milliseconds) for time-controlled search. Each completed depth emits a UCI `info` line with depth, centipawn score, node count, and the root move as PV, followed by a `bestmove`.
 
 ## Examples
 
