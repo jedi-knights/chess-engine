@@ -73,14 +73,30 @@ TEST_CASE("central knight scores higher than knight on the edge") {
     CHECK((evaluate(central) - evaluate(edge)) == 70);
 }
 
-TEST_CASE("castled king scores higher than king in the center") {
-    // Middlegame PST rewards g1 / b1 (castled positions), penalizes any
-    // advance. PST_KING[G1] = +30, PST_KING[E4] = -40 → delta 70.
+TEST_CASE("middlegame: castled king scores higher than king in the center") {
+    // Force full middlegame phase (24 = both sides at full non-pawn
+    // material) so PST_KING_MG carries 100% of the king's weight and
+    // isn't diluted by the EG table's center bonus. The two positions
+    // share identical material — the F1 bishop moved to E2 and the G1
+    // knight to F3 in both — so the only PST difference is the king's
+    // square. Delta = MG[G1] - MG[E4] = 30 - (-40) = 70.
     Position castled, exposed;
-    REQUIRE(castled.set_from_fen("4k3/8/8/8/8/8/8/6K1 w - - 0 1"));  // K on G1
-    REQUIRE(exposed.set_from_fen("4k3/8/8/8/4K3/8/8/8 w - - 0 1"));  // K on E4
+    REQUIRE(castled.set_from_fen("rnbqkbnr/8/8/8/8/5N2/4B3/RNBQ1RK1 w - - 0 1"));  // K on G1
+    REQUIRE(exposed.set_from_fen("rnbqkbnr/8/8/8/4K3/5N2/4B3/RNBQ1R2 w - - 0 1"));  // K on E4
     CHECK(evaluate(castled) > evaluate(exposed));
     CHECK((evaluate(castled) - evaluate(exposed)) == 70);
+}
+
+TEST_CASE("endgame: king in center scores higher than king in corner") {
+    // Pure K+K → phase 0 → 100% endgame weighting. This is the point of
+    // tapered eval: PST_KING_EG rewards centralization (which the MG
+    // table punishes), so the ordering flips relative to the MG test.
+    Position center, corner;
+    REQUIRE(center.set_from_fen("4k3/8/8/8/4K3/8/8/8 w - - 0 1"));  // K on E4
+    REQUIRE(corner.set_from_fen("4k3/8/8/8/8/8/8/K7 w - - 0 1"));   // K on A1
+    CHECK(evaluate(center) > evaluate(corner));
+    // Delta = PST_KING_EG[E4] - PST_KING_EG[A1] = 40 - (-50) = 90.
+    CHECK((evaluate(center) - evaluate(corner)) == 90);
 }
 
 TEST_CASE("PST is mirrored for black") {
