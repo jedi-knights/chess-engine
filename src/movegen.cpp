@@ -1,6 +1,7 @@
 #include "movegen.h"
 #include "attacks.h"
 #include "bitboard.h"
+#include "magic.h"
 
 #include <algorithm>
 
@@ -91,46 +92,11 @@ void generate_pawn_moves(const Position& pos, std::vector<Move>& moves) {
     }
 }
 
-// Walk one ray from `from` in direction (df, dr) one square at a time.
-// Stops at: board edge, own piece (exclude destination), enemy piece
-// (include as capture, then stop). Naive per-step iteration — magic
-// bitboards can replace this later without touching callers.
-void gen_ray(Square from, int df, int dr,
-             Bitboard our, Bitboard enemy,
-             std::vector<Move>& moves) {
-    int f = file_of(from) + df;
-    int r = rank_of(from) + dr;
-    while (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
-        Square   to    = make_square(File(f), Rank(r));
-        Bitboard to_bb = square_bb(to);
-        if (to_bb & our)   return;              // own piece blocks
-        moves.push_back(make_move(from, to));
-        if (to_bb & enemy) return;              // captured — ray stops
-        f += df;
-        r += dr;
-    }
-}
-
-// Return true if the first piece encountered walking (df, dr) from `sq`
-// is one of `attackers`. Used by is_square_attacked to detect sliding
-// threats without generating a move list.
-bool ray_hits_attacker(Square sq, int df, int dr,
-                       Bitboard occupied, Bitboard attackers) {
-    int f = file_of(sq) + df;
-    int r = rank_of(sq) + dr;
-    while (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
-        Bitboard bb = square_bb(make_square(File(f), Rank(r)));
-        if (bb & occupied) return (bb & attackers) != 0;
-        f += df;
-        r += dr;
-    }
-    return false;
-}
-
 // Is `sq` attacked by any piece of color `by` in the current occupancy?
 // Symmetric-attack trick for leapers: pieces that attack `sq` sit on the
 // same squares that a same-role piece AT `sq` would attack — with the
-// pawn direction inverted, since pawns only attack "forward."
+// pawn direction inverted, since pawns only attack "forward". Sliders
+// use magic bitboards for O(1) attack-set lookup.
 bool is_square_attacked(const Position& pos, Square sq, Color by) {
     if (PAWN_ATTACKS[Color(by ^ 1)][sq] & pos.pieces[by][PAWN])   return true;
     if (KNIGHT_ATTACKS[sq]              & pos.pieces[by][KNIGHT]) return true;
@@ -139,14 +105,8 @@ bool is_square_attacked(const Position& pos, Square sq, Color by) {
     const Bitboard occ = pos.occupied;
     const Bitboard bq  = pos.pieces[by][BISHOP] | pos.pieces[by][QUEEN];
     const Bitboard rq  = pos.pieces[by][ROOK]   | pos.pieces[by][QUEEN];
-    if (ray_hits_attacker(sq,  1,  1, occ, bq)) return true;
-    if (ray_hits_attacker(sq, -1,  1, occ, bq)) return true;
-    if (ray_hits_attacker(sq,  1, -1, occ, bq)) return true;
-    if (ray_hits_attacker(sq, -1, -1, occ, bq)) return true;
-    if (ray_hits_attacker(sq,  1,  0, occ, rq)) return true;
-    if (ray_hits_attacker(sq, -1,  0, occ, rq)) return true;
-    if (ray_hits_attacker(sq,  0,  1, occ, rq)) return true;
-    if (ray_hits_attacker(sq,  0, -1, occ, rq)) return true;
+    if (bishop_attacks(sq, occ) & bq) return true;
+    if (rook_attacks  (sq, occ) & rq) return true;
     return false;
 }
 
@@ -180,28 +140,24 @@ void generate_castling(const Position& pos, std::vector<Move>& moves) {
 }
 
 void generate_slider_moves(const Position& pos, std::vector<Move>& moves) {
-    const Color    us    = pos.side_to_move;
-    const Bitboard our   = pos.colors[us];
-    const Bitboard enemy = pos.colors[Color(us ^ 1)];
+    const Color    us  = pos.side_to_move;
+    const Bitboard our = pos.colors[us];
+    const Bitboard occ = pos.occupied;
 
-    // Bishops and queens share diagonal rays; rooks and queens share
-    // orthogonal rays. OR the piece bitboards to iterate each set once.
+    // Bishops and queens share diagonal attacks; rooks and queens share
+    // orthogonal attacks. OR the piece bitboards to iterate each set once.
     Bitboard diag = pos.pieces[us][BISHOP] | pos.pieces[us][QUEEN];
     while (diag) {
         Square from = pop_lsb(diag);
-        gen_ray(from,  1,  1, our, enemy, moves);   // NE
-        gen_ray(from, -1,  1, our, enemy, moves);   // NW
-        gen_ray(from,  1, -1, our, enemy, moves);   // SE
-        gen_ray(from, -1, -1, our, enemy, moves);   // SW
+        Bitboard targets = bishop_attacks(from, occ) & ~our;
+        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
     }
 
     Bitboard orth = pos.pieces[us][ROOK] | pos.pieces[us][QUEEN];
     while (orth) {
         Square from = pop_lsb(orth);
-        gen_ray(from,  1,  0, our, enemy, moves);   // E
-        gen_ray(from, -1,  0, our, enemy, moves);   // W
-        gen_ray(from,  0,  1, our, enemy, moves);   // N
-        gen_ray(from,  0, -1, our, enemy, moves);   // S
+        Bitboard targets = rook_attacks(from, occ) & ~our;
+        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
     }
 }
 

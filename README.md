@@ -49,7 +49,7 @@ Currently implemented (all 8 milestones complete):
 - FEN parsing and emission (round-tripped by the test suite)
 - `Position::make_move` / `unmake_move` with a caller-owned `UndoInfo` — supports normal, capture, en passant, castling, and promotion move types
 - **Fully legal** move generation for all piece types (knights, king, pawns with all special cases, sliders, castling) with a king-not-in-check legality filter. Perft matches the six standard positions through depth 4 (~10.7M node checks).
-- Precomputed leaper attack tables (knight, king, pawn)
+- Precomputed leaper attack tables (knight, king, pawn) + **magic bitboards for sliders** (O(1) bishop/rook/queen attack lookups; magic numbers found at init via seeded random search)
 - Perft driver and 6-position standard test suite
 - Material evaluation with **piece-square tables** (Simplified Evaluation Function values) and **tapered eval** — king PST interpolates linearly between middlegame (safety) and endgame (centralization) tables by remaining non-pawn material. Score in centipawns from side-to-move perspective.
 - **Iterative-deepening negamax with alpha-beta pruning** + **quiescence search** at leaves (extends captures until quiet, resolves horizon-effect blunders) + **MVV-LVA move ordering** + **Zobrist-hashed transposition table** (~1M entries, EXACT/LOWER/UPPER bounds, mate-score ply adjustment) + **killer moves and history heuristic** (order quiet-move beta-cutoffs first); ~11.6× speedup over baseline alpha-beta at depth 6; supports `go movetime N` with mid-iteration cancellation (any-time property); `ucinewgame` clears the TT

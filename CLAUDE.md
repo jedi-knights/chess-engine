@@ -25,6 +25,7 @@ src/                engine sources
   position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo
   movegen.[h|cpp]   generate_moves (legal moves) + in_check helper
   perft.[h|cpp]     perft driver + 6-position standard suite
+  magic.[h|cpp]     magic bitboards — init-time search + O(1) slider attacks
   zobrist.[h|cpp]   Zobrist keys + init + full-recompute reference
   tt.[h|cpp]        transposition table (fixed-size direct-mapped, always-replace)
   eval.[h|cpp]      static material evaluation (side-to-move perspective)
@@ -60,6 +61,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ `go wtime W btime B [winc W] [binc B] [movestogo N]` — derive per-move budget from the clock. Divisor formula: `budget = (remaining - safety) / (movestogo + 2)` plus 3/4 of increment, capped at 1/3 of remaining. Sudden death assumes 30 more moves. Explicit `movetime` overrides. Under-safety-buffer clocks fall back to a 1ms budget so a bestmove still ships.
 - ✅ Piece-square tables — Simplified Evaluation Function (Michniewski) values for all six piece types. White-perspective; black looks up `sq ^ 56` (rank flip). Startpos opening move is now Nb1-c3 (real chess) rather than Nb1-a3 (bad — "knight on the rim").
 - ✅ Tapered eval — phase = 4·Q + 2·R + 1·B + 1·N per side (capped at 24 = starting non-pawn material). King PST interpolates linearly between MG (safety, favors castled positions) and EG (activity, favors center) by phase weight. In pure K+K endgames the engine now walks the king toward the center (Ka1-b2, Ke1-d2) instead of the corner. Other pieces still use a single table since MG/EG differences are small.
+- ✅ Magic bitboards for slider attacks. `bishop_attacks(sq, occ)` / `rook_attacks(sq, occ)` are O(1) (3 loads + 1 multiply + 1 shift). Magic numbers discovered at init time via seeded random search (~0.25s startup for 128 magics — no hardcoded magic constant tables). Replaces the per-step gen_ray in slider move generation AND ray_hits_attacker in is_square_attacked. Perft 5 (~200M nodes total across all 6 standard positions) runs in ~16s = ~13M nodes/sec.
 - `go infinite` + `stop` (needs an async cancellation signal, not just a deadline)
 - Magic bitboards for slider attacks
 - Piece-square tables in eval

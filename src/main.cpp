@@ -1,4 +1,5 @@
 #include "attacks.h"
+#include "magic.h"
 #include "perft.h"
 #include "uci.h"
 #include "zobrist.h"
@@ -9,6 +10,7 @@
 
 int main(int argc, char** argv) {
     init_attacks();
+    init_magic();
     zobrist::init();
 
     if (argc >= 2 && std::strcmp(argv[1], "perft") == 0) {
