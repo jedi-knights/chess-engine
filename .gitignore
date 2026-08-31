@@ -1,0 +1,7 @@
+engine
+*.o
+*.d
+*.dSYM/
+.cache/
+compile_commands.json
+TODO.md
