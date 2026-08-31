@@ -38,11 +38,27 @@ int score_from_tt(int score, int ply) {
 
 using Clock = std::chrono::steady_clock;
 
+// Ceiling on ply depth for indexing killer arrays. Any real search stays
+// well under this; qsearch can nominally exceed it but is bounded by the
+// number of pieces on the board (~30). Callers clamp before indexing.
+constexpr int MAX_PLY = 128;
+
 struct SearchContext {
     SearchLimits           limits;
     Clock::time_point      start;
     bool                   stopped = false;
     uint64_t               nodes   = 0;
+
+    // Quiet moves that produced a beta cutoff earlier at this ply. Two
+    // slots so a new killer bumps the old one to slot 1 rather than
+    // losing it — most searches benefit from the two most-recent killers.
+    Move killers[MAX_PLY][2] = {};
+
+    // Butterfly-board history: keyed by (side, piece_type, dest_square).
+    // Incremented by depth² on quiet-move beta cutoffs — deeper cutoffs
+    // are stronger evidence the move is a general good idea for that
+    // (piece, destination) combination.
+    int  history[NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES] = {};
 };
 
 // Poll the wall clock every ~1024 nodes. Checking on every node makes
@@ -65,48 +81,63 @@ bool is_capture(const Position& pos, Move m) {
     return pos.board[move_to(m)] != NO_PIECE;
 }
 
-// Ordering scores. Centipawn values chosen so the "victim" bump dominates
-// even the largest attacker adjustment: PxQ (900*10 - 100 = 8900) beats
-// QxP (100*10 - 900 = 100) by nearly two orders of magnitude, so full
-// MVV-LVA ordering falls out of a single subtraction.
+// Ordering scores. Bands are chosen so higher-priority classes always
+// outrank lower ones, even with the intra-band spread:
+//
+//   TT move           : 10,000,000
+//   Any capture       :  1,000,000 + MVV-LVA
+//   Killer 1          :    900,000
+//   Killer 2          :    800,000
+//   Quiet (history)   :     0..~500,000 in practice
+//
+// The "victim*10 - attacker" MVV-LVA span (a few thousand) fits comfortably
+// inside the 100k gap between capture-base and killer-base.
 constexpr int PIECE_ORDER_VALUE[NUM_PIECE_TYPES] = {
     0, 100, 320, 330, 500, 900, 20000,   // K high — captures on king shouldn't occur but guard anyway
 };
 
-// Assign a comparable score to a move for ordering. Captures score in the
-// tens of thousands (well above any non-capture), promotions add on top,
-// non-captures score 0.
-int move_ordering_score(const Position& pos, Move m) {
+int move_ordering_score(const Position& pos, Move m, Move tt_move,
+                        const SearchContext& ctx, int ply) {
+    if (m == tt_move) return 10'000'000;
+
     int score = 0;
+
     if (is_capture(pos, m)) {
         PieceType victim = (move_type(m) == MT_EN_PASSANT)
             ? PAWN
             : type_of(pos.board[move_to(m)]);
         PieceType attacker = type_of(pos.board[move_from(m)]);
-        // Base ensures every capture outranks every quiet move even when
-        // victim < attacker (e.g., QxP: 100*10 - 900 = 100, still + 100000).
-        score = 100000 + PIECE_ORDER_VALUE[victim] * 10 - PIECE_ORDER_VALUE[attacker];
+        score = 1'000'000 + PIECE_ORDER_VALUE[victim] * 10 - PIECE_ORDER_VALUE[attacker];
+    } else {
+        // Quiet moves: killer > killer2 > history-ranked. Clamp ply to
+        // keep qsearch (which can nominally exceed MAX_PLY) safe.
+        const int p = (ply < MAX_PLY) ? ply : MAX_PLY - 1;
+        if      (m == ctx.killers[p][0]) score = 900'000;
+        else if (m == ctx.killers[p][1]) score = 800'000;
+        else {
+            PieceType pt = type_of(pos.board[move_from(m)]);
+            score = ctx.history[pos.side_to_move][pt][move_to(m)];
+        }
     }
+
     if (move_type(m) == MT_PROMOTION) {
-        // Prefer queen promotions first; treat under-promotions as tie-broken
-        // by the promotion piece's own value.
+        // Applies on top of both branches; a capture-promotion earns both
+        // its capture score and its promotion piece value.
         score += PIECE_ORDER_VALUE[move_promotion(m)];
     }
     return score;
 }
 
-// In-place descending sort by move_ordering_score. `tt_move`, if it's a
-// real move present in `moves`, is bumped to the very top — a hash-table
-// hit from a previous iteration is a much better first-move guess than
-// MVV-LVA alone can produce.
-void order_moves(const Position& pos, std::vector<Move>& moves, Move tt_move) {
+// In-place descending sort by move_ordering_score with TT-move / killer /
+// history hints woven in. std::sort is O(N log N) per call — cheap at
+// chess branching factors — but could later be replaced with a lazy
+// selection-sort that avoids sorting the tail after a beta cutoff.
+void order_moves(const Position& pos, std::vector<Move>& moves,
+                 Move tt_move, const SearchContext& ctx, int ply) {
     std::sort(moves.begin(), moves.end(),
               [&](Move a, Move b) {
-                  int sa = move_ordering_score(pos, a);
-                  int sb = move_ordering_score(pos, b);
-                  if (a == tt_move) sa += 10'000'000;
-                  if (b == tt_move) sb += 10'000'000;
-                  return sa > sb;
+                  return move_ordering_score(pos, a, tt_move, ctx, ply)
+                       > move_ordering_score(pos, b, tt_move, ctx, ply);
               });
 }
 
@@ -149,8 +180,10 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
 
     // MVV-LVA: try highest-victim captures first so the strong replies
     // trigger beta cutoffs immediately. Qsearch doesn't probe the TT
-    // (leaves change rapidly and add little), so no move hint.
-    order_moves(pos, moves, NULL_MOVE);
+    // (leaves change rapidly and add little), so no move hint. Killers
+    // and history are quiet-move heuristics — qsearch only searches
+    // captures (except when in check) so they don't affect ordering here.
+    order_moves(pos, moves, NULL_MOVE, ctx, ply);
 
     for (Move m : moves) {
         // Non-captures are only searched when we're evading check; otherwise
@@ -196,7 +229,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return 0;   // stalemate
     }
 
-    order_moves(pos, moves, tt_move);
+    order_moves(pos, moves, tt_move, ctx, ply);
 
     const int original_alpha = alpha;
     int  best      = -INF;
@@ -209,7 +242,20 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         if (ctx.stopped) return 0;                // bubble up cancellation
         if (score > best)  { best = score; best_move = m; }
         if (score > alpha) alpha = score;
-        if (alpha >= beta) break;                 // beta cutoff
+        if (alpha >= beta) {
+            // Beta cutoff on a quiet move: record it as a killer at this
+            // ply and bump its history. Captures already order well via
+            // MVV-LVA so we don't polute those tables with them.
+            if (!is_capture(pos, m) && ply < MAX_PLY) {
+                if (ctx.killers[ply][0] != m) {
+                    ctx.killers[ply][1] = ctx.killers[ply][0];
+                    ctx.killers[ply][0] = m;
+                }
+                PieceType pt = type_of(pos.board[move_from(m)]);
+                ctx.history[pos.side_to_move][pt][move_to(m)] += depth * depth;
+            }
+            break;
+        }
     }
 
     // TT store: classify by how the search terminated relative to the
@@ -243,10 +289,12 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
     // Root uses the TT-move hint from any prior iteration or earlier
     // `go` call — iterative deepening's biggest ordering win comes from
     // trying last iteration's best move first at the next depth.
+    // Killers/history at ply 0 are populated by prior root iterations of
+    // this same search_iterative call.
     int  tt_score = 0;
     Move tt_move  = NULL_MOVE;
     tt().probe(pos.key, /*depth=*/0, -INF, INF, tt_score, tt_move);
-    order_moves(pos, moves, tt_move);
+    order_moves(pos, moves, tt_move, ctx, /*ply=*/0);
 
     int  alpha     = -INF;
     int  best      = -INF;
