@@ -49,10 +49,17 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
 
 ## Testing conventions
 
-- Framework: **doctest** (single header, no CMake). `TEST_CASE` / `SUBCASE` / `CHECK` / `REQUIRE`. See existing `tests/test_position.cpp` for style.
+- Framework: **doctest** (single header, no CMake). `TEST_CASE` / `SUBCASE` / `CHECK` / `REQUIRE`. See any existing `tests/test_*.cpp` for style.
 - Every new pure-logic behavior gets a test. Round-trip invariants (make → unmake, encode → decode, FEN parse → emit) are the highest-value shape.
-- Test files: `tests/test_<unit>.cpp` mirroring `src/`. Include `"doctest.h"` first; `#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN` lives only in `tests/test_main.cpp`.
-- Tests link the whole `src/` tree (except `main.cpp`) — see Makefile `$(TEST_SRCS)`. Attack tables must be initialized once per binary; `test_position.cpp` shows the static-init idiom.
+- **One test file per src unit under test**, mirroring `src/`:
+    - `tests/test_bitboard.cpp` ↔ `src/bitboard.[h|cpp]`
+    - `tests/test_attacks.cpp`  ↔ `src/attacks.[h|cpp]`
+    - `tests/test_position.cpp` ↔ `src/position.[h|cpp]` (FEN + make/unmake forward-correctness only)
+    - `tests/test_movegen.cpp`  ↔ `src/movegen.[h|cpp]` (generator shape + movegen-driven make/unmake walks)
+    - `tests/test_perft.cpp`    ↔ `src/perft.[h|cpp]`
+  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`.
+- `tests/test_main.cpp` uses `DOCTEST_CONFIG_IMPLEMENT` and provides `main()` — this is the single place where `init_attacks()` is called so per-TU static-init hacks are unnecessary.
+- Tests link the whole `src/` tree (except `main.cpp`) — see Makefile `$(TEST_SRCS)`.
 - Do not mock `Position` internals. Verify through `to_fen()` / public accessors.
 
 ## Perft gotcha
