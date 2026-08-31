@@ -1,5 +1,7 @@
 #include "position.h"
 #include "bitboard.h"
+#include "zobrist.h"
+
 #include <cassert>
 #include <cctype>
 #include <cstdlib>
@@ -34,6 +36,7 @@ void Position::clear() {
     ep_square       = NO_SQUARE;
     halfmove_clock  = 0;
     fullmove_number = 1;
+    key             = 0;
 }
 
 bool Position::set_from_fen(const std::string& fen) {
@@ -77,6 +80,7 @@ bool Position::set_from_fen(const std::string& fen) {
     if (ep != "-" && ep.size() == 2) {
         ep_square = make_square(File(ep[0] - 'a'), Rank(ep[1] - '1'));
     }
+    key = zobrist::compute(*this);
     return true;
 }
 
@@ -133,6 +137,7 @@ void Position::put_piece(Square s, Piece p) {
     pieces[color_of(p)][type_of(p)] |= bb;
     colors[color_of(p)]         |= bb;
     occupied                    |= bb;
+    key ^= zobrist::PIECE_SQ[color_of(p)][type_of(p)][s];
 }
 
 void Position::remove_piece(Square s) {
@@ -143,6 +148,7 @@ void Position::remove_piece(Square s) {
     pieces[color_of(p)][type_of(p)] &= ~bb;
     colors[color_of(p)]         &= ~bb;
     occupied                    &= ~bb;
+    key ^= zobrist::PIECE_SQ[color_of(p)][type_of(p)][s];
 }
 
 void Position::make_move(Move m, UndoInfo& u) {
@@ -160,9 +166,16 @@ void Position::make_move(Move m, UndoInfo& u) {
     u.castling       = castling;
     u.ep_square      = ep_square;
     u.halfmove_clock = halfmove_clock;
+    u.key            = key;
     u.captured       = (mt == MT_EN_PASSANT)
         ? Piece(us == WHITE ? B_PAWN : W_PAWN)
         : board[to];
+
+    // Roll the pre-move castling/ep/side keys OUT now. The corresponding
+    // post-move keys are XOR'd back in at the end after those fields are
+    // updated. Piece-square keys are handled inside put_piece/remove_piece.
+    key ^= zobrist::CASTLING[castling & 15];
+    if (ep_square != NO_SQUARE) key ^= zobrist::EP_FILE[file_of(ep_square)];
 
     // Remove captured piece first (en passant captures off-square).
     if (u.captured != NO_PIECE) {
@@ -212,6 +225,12 @@ void Position::make_move(Move m, UndoInfo& u) {
 
     if (us == BLACK) ++fullmove_number;
     side_to_move = them;
+
+    // Roll the new castling / ep / side keys IN. SIDE toggles on every
+    // move (XOR is self-inverse) regardless of which color moved.
+    key ^= zobrist::CASTLING[castling & 15];
+    if (ep_square != NO_SQUARE) key ^= zobrist::EP_FILE[file_of(ep_square)];
+    key ^= zobrist::SIDE;
 
     // Real games have exactly one king per side, but the standard perft
     // suite includes contrived positions with none — assert only the upper
@@ -265,6 +284,10 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
     ep_square      = u.ep_square;
     castling       = u.castling;
     halfmove_clock = u.halfmove_clock;
+    // Snapshot restore beats redoing all the incremental XORs by hand —
+    // and it's what tests check against (compute(pos) after unmake must
+    // equal the pre-move key).
+    key            = u.key;
 }
 
 std::string Position::pretty() const {

@@ -52,7 +52,7 @@ Currently implemented (all 8 milestones complete):
 - Precomputed leaper attack tables (knight, king, pawn)
 - Perft driver and 6-position standard test suite
 - Material evaluation (centipawns, from side-to-move perspective)
-- **Iterative-deepening negamax with alpha-beta pruning** + **quiescence search** at leaves (extends captures until quiet, resolves horizon-effect blunders); distinguishes checkmate from stalemate; prefers shorter mates; supports `go movetime N` with mid-iteration cancellation (any-time property)
+- **Iterative-deepening negamax with alpha-beta pruning** + **quiescence search** at leaves (extends captures until quiet, resolves horizon-effect blunders) + **MVV-LVA move ordering** + **Zobrist-hashed transposition table** (~1M entries, EXACT/LOWER/UPPER bounds, mate-score ply adjustment); ~9× speedup over baseline alpha-beta at depth 6; supports `go movetime N` with mid-iteration cancellation (any-time property); `ucinewgame` clears the TT
 - UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen]`, `go [depth N]`, `d`, `quit`) with `info` and `bestmove` output
 - doctest unit test suite (64 cases) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 

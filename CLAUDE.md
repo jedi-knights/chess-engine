@@ -25,8 +25,10 @@ src/                engine sources
   position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo
   movegen.[h|cpp]   generate_moves (legal moves) + in_check helper
   perft.[h|cpp]     perft driver + 6-position standard suite
+  zobrist.[h|cpp]   Zobrist keys + init + full-recompute reference
+  tt.[h|cpp]        transposition table (fixed-size direct-mapped, always-replace)
   eval.[h|cpp]      static material evaluation (side-to-move perspective)
-  search.[h|cpp]    fixed-depth negamax + alpha-beta; SearchResult return
+  search.[h|cpp]    iterative-deepening negamax + alpha-beta + qsearch + MVV-LVA + TT
   uci.[h|cpp]       UCI protocol loop; move_to_uci notation helper
   main.cpp          entry (dispatches `perft` subcommand or falls into UCI)
 tests/              doctest suite; one file per src unit under test
@@ -52,9 +54,10 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ Iterative deepening + `go movetime N` (any-time property, per-iteration `info` output). `search_best(pos, depth)` is preserved as a primitive; `search_iterative(pos, limits, callback)` is the production entry point.
 - ✅ Quiescence search — extends leaves with captures only until quiet; standpat gives a lower bound; in-check nodes skip standpat and consider all moves (evasion). Startpos scores now stay at 0 across depths (was ±100), and total node counts DROP at deeper depths because stable evals give tighter alpha-beta cutoffs.
 - ✅ Move ordering — MVV-LVA at every search node (negamax, qsearch, root). Score = `100000 + victim_value * 10 - attacker_value` for captures, promotion piece value added on top, 0 for other quiet moves. Startpos depth-6 nodes dropped 316k → 184k (~42% cut on top of qsearch). Killers/history not yet.
+- ✅ Zobrist hashing + transposition table. Position.key updated incrementally in make/unmake (snapshot restored via UndoInfo on unmake). Fixed-size direct-mapped TT (2^20 entries, always-replace). Bounds handled (EXACT/LOWER/UPPER), mate scores ply-adjusted on store/probe. TT move hint fed into `order_moves` — hash hits from prior iterations become the very first move tried at the next depth. Startpos depth-6 nodes: 184k → 89k (~51% additional cut, 9× total speedup from baseline). `ucinewgame` clears the table.
+- Killer moves + history heuristic (better ordering for QUIET moves — MVV-LVA only orders captures, TT-move only orders single hits)
 - `go infinite` + `stop` (needs an async cancellation signal, not just a deadline)
 - `go wtime W btime B` — compute movetime from remaining clock
-- Transposition table (Zobrist hashing) — ID benefits most from this since re-searches hit the same nodes
 - Magic bitboards for slider attacks
 - Piece-square tables in eval
 - UCI `position ... moves e2e4 ...` — needs a `parse_uci_move` helper

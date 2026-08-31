@@ -15,10 +15,11 @@ enum CastlingRights : int {
 // State that make_move mutates but unmake_move cannot reconstruct from the
 // move alone. Caller owns storage (stack-allocate one per ply in search).
 struct UndoInfo {
-    Piece  captured       = NO_PIECE;   // includes en-passant captures
-    int    castling       = NO_CASTLING;
-    Square ep_square      = NO_SQUARE;
-    int    halfmove_clock = 0;
+    Piece    captured       = NO_PIECE;   // includes en-passant captures
+    int      castling       = NO_CASTLING;
+    Square   ep_square      = NO_SQUARE;
+    int      halfmove_clock = 0;
+    uint64_t key            = 0;          // Zobrist key snapshot for unmake
 };
 
 struct Position {
@@ -27,11 +28,12 @@ struct Position {
     Bitboard colors[NUM_COLORS]                  = {};
     Bitboard occupied                            = 0;
 
-    Color   side_to_move    = WHITE;
-    int     castling        = NO_CASTLING;
-    Square  ep_square       = NO_SQUARE;
-    int     halfmove_clock  = 0;
-    int     fullmove_number = 1;
+    Color    side_to_move    = WHITE;
+    int      castling        = NO_CASTLING;
+    Square   ep_square       = NO_SQUARE;
+    int      halfmove_clock  = 0;
+    int      fullmove_number = 1;
+    uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
 
     void        clear();
     bool        set_from_fen(const std::string& fen);

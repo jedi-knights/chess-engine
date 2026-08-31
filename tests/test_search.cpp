@@ -80,10 +80,15 @@ TEST_CASE("search finds a unique mate-in-1") {
 TEST_CASE("search node count grows with depth") {
     // Not a correctness assertion so much as a smoke test: deeper searches
     // should visit strictly more nodes on a non-terminal position.
+    // TT must be cleared — a warm table from a prior test can make a
+    // depth-1 search visit fewer nodes than depth-2 in isolation would.
+    clear_transposition_table();
     Position pos;
     REQUIRE(pos.set_from_fen(STARTPOS_FEN));
     SearchResult d1 = search_best(pos, 1);
+    clear_transposition_table();
     SearchResult d2 = search_best(pos, 2);
+    clear_transposition_table();
     SearchResult d3 = search_best(pos, 3);
     CHECK(d1.nodes < d2.nodes);
     CHECK(d2.nodes < d3.nodes);
@@ -118,7 +123,10 @@ TEST_CASE("iterative deepening fires callback once per completed depth") {
 
 TEST_CASE("iterative deepening accumulates nodes across iterations") {
     // Each iteration re-searches from the root, so cumulative node count
-    // must strictly increase across callbacks.
+    // must strictly increase across callbacks. TT reuse would still leave
+    // this monotone (each depth touches new deeper subtrees), but clearing
+    // it isolates from any warm state left by other tests.
+    clear_transposition_table();
     Position pos;
     REQUIRE(pos.set_from_fen(STARTPOS_FEN));
     SearchLimits limits;
@@ -196,6 +204,39 @@ TEST_CASE("quiescence still detects mate at qsearch leaves") {
     SearchResult r = search_best(pos, 3);
     CHECK(r.best_move == NULL_MOVE);
     CHECK(r.score < 0);
+}
+
+// --- Transposition table ------------------------------------------------
+
+TEST_CASE("TT: warm table reduces node count on a re-search of the same position") {
+    // Search once from cold, once from warm. The warm search must find
+    // the same best move at the same score with fewer (or equal) nodes.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+
+    clear_transposition_table();
+    SearchResult cold = search_best(pos, 4);
+    SearchResult warm = search_best(pos, 4);   // TT populated by `cold`
+
+    CHECK(warm.best_move == cold.best_move);
+    CHECK(warm.score     == cold.score);
+    CHECK(warm.nodes     <= cold.nodes);
+}
+
+TEST_CASE("TT: clear resets prior state (same result cold-vs-cold)") {
+    // Two cold searches must be identical — TT clear is the reset signal
+    // UCI's `ucinewgame` relies on to prevent stale scores biasing a new game.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+
+    clear_transposition_table();
+    SearchResult first = search_best(pos, 3);
+    clear_transposition_table();
+    SearchResult second = search_best(pos, 3);
+
+    CHECK(first.best_move == second.best_move);
+    CHECK(first.score     == second.score);
+    CHECK(first.nodes     == second.nodes);
 }
 
 TEST_CASE("iterative deepening honors movetime_ms as an upper bound") {

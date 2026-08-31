@@ -106,7 +106,8 @@ void uci_loop(std::istream& in, std::ostream& out) {
         is >> cmd;
         if      (cmd == "uci")        cmd_uci(out);
         else if (cmd == "isready")    cmd_isready(out);
-        else if (cmd == "ucinewgame") pos.set_from_fen(STARTPOS_FEN);
+        else if (cmd == "ucinewgame") { pos.set_from_fen(STARTPOS_FEN);
+                                        clear_transposition_table(); }
         else if (cmd == "position")   cmd_position(is, pos);
         else if (cmd == "go")         cmd_go(is, pos, out);
         else if (cmd == "d")          out << pos.pretty() << std::flush;

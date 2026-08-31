@@ -31,3 +31,8 @@ SearchResult search_best(Position& pos, int depth);
 // fully-completed result is returned — the any-time property.
 SearchResult search_iterative(Position& pos, SearchLimits limits,
                               InfoCallback on_iter = nullptr);
+
+// Reset the transposition table. UCI's `ucinewgame` calls this so entries
+// from the previous game don't bias the new one; tests use it to isolate
+// search behavior from prior-run state.
+void clear_transposition_table();

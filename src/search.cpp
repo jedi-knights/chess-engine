@@ -1,15 +1,40 @@
 #include "search.h"
 #include "eval.h"
 #include "movegen.h"
+#include "tt.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <vector>
 
 namespace {
 
 constexpr int INF        = 1'000'000;   // sentinel — never a real eval score
 constexpr int MATE_SCORE = 100'000;     // large but distinguishable from INF
+
+// Module-static TT — lives for the process, warm across `go` commands so
+// iterative deepening's later iterations can hit entries from earlier
+// iterations. Sized at 2^20 entries (~24 MB with 24-byte TTEntry).
+TranspositionTable& tt() {
+    static TranspositionTable inst(20);
+    return inst;
+}
+
+// Mate scores encode "distance from THIS node to mate," but the TT is
+// shared across nodes at different plies, so a stored mate score must be
+// converted to a ply-invariant "distance to mate from the storing node"
+// on store and back to "distance from probing node" on probe.
+int score_to_tt(int score, int ply) {
+    if (score >  MATE_SCORE - 1000) return score + ply;
+    if (score < -MATE_SCORE + 1000) return score - ply;
+    return score;
+}
+int score_from_tt(int score, int ply) {
+    if (score >  MATE_SCORE - 1000) return score - ply;
+    if (score < -MATE_SCORE + 1000) return score + ply;
+    return score;
+}
 
 using Clock = std::chrono::steady_clock;
 
@@ -70,14 +95,18 @@ int move_ordering_score(const Position& pos, Move m) {
     return score;
 }
 
-// In-place descending sort by move_ordering_score. std::sort is O(N log N)
-// per call — fine at chess branching factors (~30-40 moves). Could later
-// be replaced with a lazy "pick next best" that avoids sorting the full
-// list when a beta cutoff happens early.
-void order_moves(const Position& pos, std::vector<Move>& moves) {
+// In-place descending sort by move_ordering_score. `tt_move`, if it's a
+// real move present in `moves`, is bumped to the very top — a hash-table
+// hit from a previous iteration is a much better first-move guess than
+// MVV-LVA alone can produce.
+void order_moves(const Position& pos, std::vector<Move>& moves, Move tt_move) {
     std::sort(moves.begin(), moves.end(),
               [&](Move a, Move b) {
-                  return move_ordering_score(pos, a) > move_ordering_score(pos, b);
+                  int sa = move_ordering_score(pos, a);
+                  int sb = move_ordering_score(pos, b);
+                  if (a == tt_move) sa += 10'000'000;
+                  if (b == tt_move) sb += 10'000'000;
+                  return sa > sb;
               });
 }
 
@@ -119,8 +148,9 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     }
 
     // MVV-LVA: try highest-victim captures first so the strong replies
-    // trigger beta cutoffs immediately.
-    order_moves(pos, moves);
+    // trigger beta cutoffs immediately. Qsearch doesn't probe the TT
+    // (leaves change rapidly and add little), so no move hint.
+    order_moves(pos, moves, NULL_MOVE);
 
     for (Move m : moves) {
         // Non-captures are only searched when we're evading check; otherwise
@@ -139,9 +169,9 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     return alpha;
 }
 
-// Negamax with alpha-beta. `ply` is distance from the root so we can prefer
-// shorter mates (deeper mate scores are penalized), and shorter paths out
-// of a losing position (later mates score less negative).
+// Negamax with alpha-beta + TT. `ply` is distance from the root so we can
+// prefer shorter mates (deeper mate scores are penalized), and shorter
+// paths out of a losing position (later mates score less negative).
 int negamax(Position& pos, int depth, int alpha, int beta,
             int ply, SearchContext& ctx) {
     ++ctx.nodes;
@@ -149,6 +179,14 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     // Leaf: hand off to quiescence rather than static-evaluating a
     // position that may be mid-exchange. See qsearch for the rationale.
     if (depth == 0) return qsearch(pos, alpha, beta, ply, ctx);
+
+    // TT probe: may return an immediately-usable score, and always hands
+    // back a move to try first if the key was seen before.
+    int  tt_score = 0;
+    Move tt_move  = NULL_MOVE;
+    if (tt().probe(pos.key, depth, alpha, beta, tt_score, tt_move)) {
+        return score_from_tt(tt_score, ply);
+    }
 
     std::vector<Move> moves;
     generate_moves(pos, moves);
@@ -158,19 +196,30 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return 0;   // stalemate
     }
 
-    order_moves(pos, moves);
+    order_moves(pos, moves, tt_move);
 
-    int best = -INF;
+    const int original_alpha = alpha;
+    int  best      = -INF;
+    Move best_move = NULL_MOVE;
     for (Move m : moves) {
         UndoInfo u;
         pos.make_move(m, u);
         int score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
         pos.unmake_move(m, u);
         if (ctx.stopped) return 0;                // bubble up cancellation
-        if (score > best)  best  = score;
+        if (score > best)  { best = score; best_move = m; }
         if (score > alpha) alpha = score;
         if (alpha >= beta) break;                 // beta cutoff
     }
+
+    // TT store: classify by how the search terminated relative to the
+    // original window. `best >= beta` means a fail-high (LOWER bound);
+    // `best <= original_alpha` means no move improved on alpha (UPPER
+    // bound); otherwise the score is exact.
+    TTBound bound = (best >= beta)            ? TT_LOWER
+                  : (best <= original_alpha)  ? TT_UPPER
+                                              : TT_EXACT;
+    tt().store(pos.key, depth, score_to_tt(best, ply), best_move, bound);
     return best;
 }
 
@@ -191,7 +240,13 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
         return true;
     }
 
-    order_moves(pos, moves);
+    // Root uses the TT-move hint from any prior iteration or earlier
+    // `go` call — iterative deepening's biggest ordering win comes from
+    // trying last iteration's best move first at the next depth.
+    int  tt_score = 0;
+    Move tt_move  = NULL_MOVE;
+    tt().probe(pos.key, /*depth=*/0, -INF, INF, tt_score, tt_move);
+    order_moves(pos, moves, tt_move);
 
     int  alpha     = -INF;
     int  best      = -INF;
@@ -208,6 +263,9 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
     out.best_move = best_move;
     out.score     = best;
     out.depth     = depth;
+    // Store the root result so the next ID iteration (and future `go`
+    // calls on the same position) benefit from move ordering.
+    tt().store(pos.key, depth, score_to_tt(best, 0), best_move, TT_EXACT);
     return true;
 }
 
@@ -220,6 +278,10 @@ SearchResult search_best(Position& pos, int depth) {
     search_root(pos, depth, ctx, r);
     r.nodes = ctx.nodes;
     return r;
+}
+
+void clear_transposition_table() {
+    tt().clear();
 }
 
 SearchResult search_iterative(Position& pos, SearchLimits limits,
