@@ -8,9 +8,11 @@ uint64_t perft(Position& pos, int depth) {
     std::vector<Move> moves;
     generate_moves(pos, moves);
     uint64_t nodes = 0;
+    UndoInfo u;
     for (Move m : moves) {
-        (void)m;
-        // TODO: pos.make_move(m); nodes += perft(pos, depth - 1); pos.unmake_move(m);
+        pos.make_move(m, u);
+        nodes += perft(pos, depth - 1);
+        pos.unmake_move(m, u);
     }
     return nodes;
 }

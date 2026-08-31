@@ -1,6 +1,8 @@
 #include "position.h"
 #include "bitboard.h"
+#include <cassert>
 #include <cctype>
+#include <cstdlib>
 #include <sstream>
 
 static Piece piece_from_char(char c) {
@@ -106,6 +108,168 @@ std::string Position::to_fen() const {
     else o << char('a' + file_of(ep_square)) << char('1' + rank_of(ep_square));
     o << ' ' << halfmove_clock << ' ' << fullmove_number;
     return o.str();
+}
+
+static constexpr Color color_of(Piece p) { return (p < B_PAWN) ? WHITE : BLACK; }
+static constexpr PieceType type_of(Piece p) {
+    return PieceType(p < B_PAWN ? p : p - 8);
+}
+
+// Bits cleared from `castling` when a piece leaves OR is captured on that
+// square. King-source and rook-source squares are the only entries that
+// differ from 15 (ALL_CASTLING). ANDing with CR_MASK[from] & CR_MASK[to]
+// handles king moves, rook moves, and rook captures in one step.
+static constexpr int CR_MASK[NUM_SQUARES] = {
+    13, 15, 15, 15, 12, 15, 15, 14,   // rank 1 (A1=~WHITE_OOO, E1=~(WHITE_OO|OOO), H1=~WHITE_OO)
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+     7, 15, 15, 15,  3, 15, 15, 11,   // rank 8 mirror
+};
+
+void Position::put_piece(Square s, Piece p) {
+    assert(board[s] == NO_PIECE);
+    assert(p != NO_PIECE);
+    board[s]                     = p;
+    Bitboard bb                  = square_bb(s);
+    pieces[color_of(p)][type_of(p)] |= bb;
+    colors[color_of(p)]         |= bb;
+    occupied                    |= bb;
+}
+
+void Position::remove_piece(Square s) {
+    Piece p = board[s];
+    assert(p != NO_PIECE);
+    board[s]                     = NO_PIECE;
+    Bitboard bb                  = square_bb(s);
+    pieces[color_of(p)][type_of(p)] &= ~bb;
+    colors[color_of(p)]         &= ~bb;
+    occupied                    &= ~bb;
+}
+
+void Position::make_move(Move m, UndoInfo& u) {
+    const Square   from   = move_from(m);
+    const Square   to     = move_to(m);
+    const MoveType mt     = move_type(m);
+    const Piece    moving = board[from];
+    const Color    us     = side_to_move;
+    const Color    them   = Color(us ^ 1);
+
+    assert(moving != NO_PIECE);
+    assert(color_of(moving) == us);
+
+    // Snapshot pre-move state that unmake cannot derive from `m` alone.
+    u.castling       = castling;
+    u.ep_square      = ep_square;
+    u.halfmove_clock = halfmove_clock;
+    u.captured       = (mt == MT_EN_PASSANT)
+        ? Piece(us == WHITE ? B_PAWN : W_PAWN)
+        : board[to];
+
+    // Remove captured piece first (en passant captures off-square).
+    if (u.captured != NO_PIECE) {
+        Square cap_sq = (mt == MT_EN_PASSANT)
+            ? Square(int(to) + (us == WHITE ? -8 : 8))
+            : to;
+        remove_piece(cap_sq);
+    }
+
+    // Move the piece; promotion changes type at the destination.
+    remove_piece(from);
+    if (mt == MT_PROMOTION) {
+        PieceType promo = move_promotion(m);
+        put_piece(to, Piece(us == WHITE ? promo : promo + 8));
+    } else {
+        put_piece(to, moving);
+    }
+
+    // Castling: the king move is already applied; also move the rook.
+    if (mt == MT_CASTLING) {
+        Square rook_from, rook_to;
+        if (file_of(to) == FILE_G) {  // kingside
+            rook_from = Square(int(to) + 1);
+            rook_to   = Square(int(to) - 1);
+        } else {                      // queenside (FILE_C)
+            rook_from = Square(int(to) - 2);
+            rook_to   = Square(int(to) + 1);
+        }
+        Piece rook = board[rook_from];
+        assert(type_of(rook) == ROOK);
+        remove_piece(rook_from);
+        put_piece(rook_to, rook);
+    }
+
+    // Castling rights: single AND handles king move, rook move, and rook capture.
+    castling &= CR_MASK[from] & CR_MASK[to];
+
+    // En passant: set only when a pawn double-pushes; cleared otherwise.
+    ep_square = NO_SQUARE;
+    if (type_of(moving) == PAWN && std::abs(int(to) - int(from)) == 16) {
+        ep_square = Square((int(from) + int(to)) / 2);
+    }
+
+    // Halfmove clock: reset on pawn move or capture.
+    if (type_of(moving) == PAWN || u.captured != NO_PIECE) halfmove_clock = 0;
+    else                                                    ++halfmove_clock;
+
+    if (us == BLACK) ++fullmove_number;
+    side_to_move = them;
+
+    // Real games have exactly one king per side, but the standard perft
+    // suite includes contrived positions with none — assert only the upper
+    // bound to catch actual corruption (double-king) without rejecting them.
+    assert(popcount(pieces[WHITE][KING]) <= 1);
+    assert(popcount(pieces[BLACK][KING]) <= 1);
+}
+
+void Position::unmake_move(Move m, const UndoInfo& u) {
+    const Square   from = move_from(m);
+    const Square   to   = move_to(m);
+    const MoveType mt   = move_type(m);
+    const Color    us   = Color(side_to_move ^ 1);   // the mover, before flip
+
+    side_to_move = us;
+    if (us == BLACK) --fullmove_number;
+
+    // Undo the piece move. For promotion, restore a pawn at `from` rather
+    // than the promoted piece.
+    Piece at_to = board[to];
+    remove_piece(to);
+    if (mt == MT_PROMOTION) {
+        put_piece(from, Piece(us == WHITE ? W_PAWN : B_PAWN));
+    } else {
+        put_piece(from, at_to);
+    }
+
+    // Restore captured piece (on the ep-target square for en passant).
+    if (u.captured != NO_PIECE) {
+        Square cap_sq = (mt == MT_EN_PASSANT)
+            ? Square(int(to) + (us == WHITE ? -8 : 8))
+            : to;
+        put_piece(cap_sq, u.captured);
+    }
+
+    // Undo castling rook move.
+    if (mt == MT_CASTLING) {
+        Square rook_from, rook_to;
+        if (file_of(to) == FILE_G) {
+            rook_from = Square(int(to) + 1);
+            rook_to   = Square(int(to) - 1);
+        } else {
+            rook_from = Square(int(to) - 2);
+            rook_to   = Square(int(to) + 1);
+        }
+        Piece rook = board[rook_to];
+        remove_piece(rook_to);
+        put_piece(rook_from, rook);
+    }
+
+    ep_square      = u.ep_square;
+    castling       = u.castling;
+    halfmove_clock = u.halfmove_clock;
 }
 
 std::string Position::pretty() const {
