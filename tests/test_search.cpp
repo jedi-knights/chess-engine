@@ -11,6 +11,7 @@
 #include "search.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <vector>
 
 TEST_CASE("search returns a legal move for the starting position") {
@@ -144,6 +145,57 @@ TEST_CASE("iterative deepening returns at least the depth-1 result") {
     SearchResult r = search_iterative(pos, limits);
     CHECK(r.best_move != NULL_MOVE);
     CHECK(r.depth >= 1);
+}
+
+// --- Quiescence -------------------------------------------------------
+
+TEST_CASE("quiescence resolves the horizon on a defended-piece capture") {
+    // White queen on e4 is attacked by a black knight on d6. The knight
+    // is defended by the pawn on c7. Without quiescence, a depth-1 search
+    // would see Qxd6 as "free" (+320 for winning the knight) because it
+    // stops evaluating before black's cxd6 recapture. With quiescence,
+    // depth 1 resolves the exchange: black recaptures, white loses queen
+    // for knight+pawn, and Qxd6 scores as losing.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/2p5/3n4/8/4Q3/8/8/4K3 w - - 0 1"));
+    SearchResult r = search_best(pos, 1);
+    // Correct play: move the queen out of danger. Qxd6 must NOT be picked.
+    CHECK_FALSE(r.best_move == ::make_move(E4, D6));
+    // Best move should keep white ahead — white starts with K+Q vs K+N+P
+    // (900 vs 420), so a queen escape leaves the score near +480.
+    CHECK(r.score > 200);
+}
+
+TEST_CASE("quiescence stabilizes score across depths on a quiet position") {
+    // Startpos evaluates to 0 statically. Without quiescence, deeper
+    // searches oscillated around 0 (±100 at successive plies — the
+    // horizon caught a pawn move mid-exchange). With quiescence, the
+    // eval at every completed depth should stay near 0 because leaves
+    // resolve any speculative captures rather than banking their gain.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    SearchLimits limits;
+    limits.max_depth = 4;
+    std::vector<int> scores;
+    search_iterative(pos, limits, [&](const SearchResult& r) {
+        scores.push_back(r.score);
+    });
+    REQUIRE(scores.size() == 4);
+    for (int s : scores) {
+        INFO("iteration score: " << s);
+        CHECK(std::abs(s) < 50);   // near-zero, no oscillation
+    }
+}
+
+TEST_CASE("quiescence still detects mate at qsearch leaves") {
+    // Same back-rank mate as the negamax test. Terminal detection has to
+    // work at qsearch's terminal too, otherwise a mated leaf would
+    // stand-pat to a material eval and the engine would think it's fine.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/6PP/5r1K w - - 0 1"));
+    SearchResult r = search_best(pos, 3);
+    CHECK(r.best_move == NULL_MOVE);
+    CHECK(r.score < 0);
 }
 
 TEST_CASE("iterative deepening honors movetime_ms as an upper bound") {

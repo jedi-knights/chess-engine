@@ -31,6 +31,68 @@ bool time_up(SearchContext& ctx) {
     return elapsed_ms >= ctx.limits.movetime_ms;
 }
 
+// A move captures iff it removes an enemy piece from the board — either
+// the destination square is occupied (normal capture) or the move is en
+// passant (destination empty; captured pawn sits on an adjacent square).
+bool is_capture(const Position& pos, Move m) {
+    if (move_type(m) == MT_EN_PASSANT) return true;
+    return pos.board[move_to(m)] != NO_PIECE;
+}
+
+// Quiescence search: extend the main search at leaf nodes with capture
+// sequences only, until the position is "quiet" (no more captures to
+// consider). This fixes the horizon effect — without it, a search that
+// stops mid-exchange evaluates as if the exchange were resolved in the
+// mover's favor, and the engine plays speculative captures that get
+// refuted one ply beyond its horizon.
+//
+// The trick: "stand-pat" assumes the mover can decline to capture (a
+// reasonable proxy since at a real interior node they could always play
+// a quiet move). Static eval becomes a lower bound on the true value;
+// any capture that fails to improve it can be pruned. Convergence is
+// guaranteed because every recursive step removes a piece from the board.
+//
+// Exception: when the side to move is in check, standing pat is unsound
+// (we're not allowed to "do nothing"), so we consider all legal moves
+// and let the recursion resolve the check.
+int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
+    ++ctx.nodes;
+    if (ctx.stopped || time_up(ctx)) { ctx.stopped = true; return 0; }
+
+    const bool checked = in_check(pos);
+
+    if (!checked) {
+        int stand_pat = evaluate(pos);
+        if (stand_pat >= beta)   return beta;
+        if (stand_pat > alpha)   alpha = stand_pat;
+    }
+
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+
+    if (moves.empty()) {
+        // A terminal position reached via qsearch — same mate/stalemate
+        // resolution as full negamax at a leaf with no legal moves.
+        return checked ? (-MATE_SCORE + ply) : 0;
+    }
+
+    for (Move m : moves) {
+        // Non-captures are only searched when we're evading check; otherwise
+        // they don't help resolve the tactical sequence we entered qsearch
+        // to analyze, and searching them would defeat the point.
+        if (!checked && !is_capture(pos, m)) continue;
+
+        UndoInfo u;
+        pos.make_move(m, u);
+        int score = -qsearch(pos, -beta, -alpha, ply + 1, ctx);
+        pos.unmake_move(m, u);
+        if (ctx.stopped)   return 0;
+        if (score >= beta) return beta;
+        if (score > alpha) alpha = score;
+    }
+    return alpha;
+}
+
 // Negamax with alpha-beta. `ply` is distance from the root so we can prefer
 // shorter mates (deeper mate scores are penalized), and shorter paths out
 // of a losing position (later mates score less negative).
@@ -38,7 +100,9 @@ int negamax(Position& pos, int depth, int alpha, int beta,
             int ply, SearchContext& ctx) {
     ++ctx.nodes;
     if (ctx.stopped || time_up(ctx)) { ctx.stopped = true; return 0; }
-    if (depth == 0) return evaluate(pos);
+    // Leaf: hand off to quiescence rather than static-evaluating a
+    // position that may be mid-exchange. See qsearch for the rationale.
+    if (depth == 0) return qsearch(pos, alpha, beta, ply, ctx);
 
     std::vector<Move> moves;
     generate_moves(pos, moves);
