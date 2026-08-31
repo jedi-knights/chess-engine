@@ -29,7 +29,8 @@ src/                engine sources
   tt.[h|cpp]        transposition table (fixed-size direct-mapped, always-replace)
   eval.[h|cpp]      static material evaluation (side-to-move perspective)
   search.[h|cpp]    iterative-deepening negamax + alpha-beta + qsearch + MVV-LVA + TT
-  uci.[h|cpp]       UCI protocol loop; move_to_uci notation helper
+  notation.[h|cpp]  UCI move ↔ Move (move_to_uci, parse_uci_move)
+  uci.[h|cpp]       UCI protocol loop; time management for wtime/btime
   main.cpp          entry (dispatches `perft` subcommand or falls into UCI)
 tests/              doctest suite; one file per src unit under test
 third_party/
@@ -60,7 +61,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - `go infinite` + `stop` (needs an async cancellation signal, not just a deadline)
 - Magic bitboards for slider attacks
 - Piece-square tables in eval
-- UCI `position ... moves e2e4 ...` — needs a `parse_uci_move` helper
+- ✅ UCI `position ... moves e2e4 e7e5 ...` — parse_uci_move infers MT_EN_PASSANT (pawn to ep_square) and MT_CASTLING (king ±2 files) from position state. Every move token is verified against the legal-move list before apply, so a malformed or illegal token stops processing rather than triggering a make_move assertion. Notation helpers live in `src/notation.[h|cpp]` with a full move_to_uci ↔ parse_uci_move round-trip test.
 
 Do not skip a milestone. Perft numbers stay artificially low until every piece type generates, but each milestone's *round-trip* invariants (see `tests/test_position.cpp`) must hold before advancing.
 

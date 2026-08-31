@@ -1,30 +1,17 @@
 #include "uci.h"
+#include "movegen.h"
+#include "notation.h"
 #include "position.h"
 #include "search.h"
 #include "types.h"
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
-
-// Serialize a Move to UCI long-algebraic notation ("e2e4", "e7e8q").
-// NULL_MOVE → "0000" per the UCI convention for "no legal move."
-std::string move_to_uci(Move m) {
-    if (m == NULL_MOVE) return "0000";
-    Square from = move_from(m);
-    Square to   = move_to(m);
-    std::string s;
-    s += char('a' + file_of(from));
-    s += char('1' + rank_of(from));
-    s += char('a' + file_of(to));
-    s += char('1' + rank_of(to));
-    if (move_type(m) == MT_PROMOTION) {
-        s += "nbrq"[move_promotion(m) - KNIGHT];
-    }
-    return s;
-}
 
 void cmd_uci(std::ostream& out) {
     out << "id name jedi-engine 0.0.1\n"
@@ -50,9 +37,20 @@ void cmd_position(std::istringstream& is, Position& pos) {
         }
         pos.set_from_fen(fen);
     }
-    // TODO: consume trailing "moves e2e4 e7e5 ..." tokens and apply them
-    //       via pos.make_move() once move parsing exists.
-    while (is >> token) { /* drain */ }
+    // Trailing `moves e2e4 e7e5 ...`: parse each token, verify it's in
+    // the legal-move list, apply. Any parse failure or illegal move
+    // stops processing — safer than trusting the GUI blindly, since a
+    // malformed token could otherwise trigger a make_move assertion.
+    if (token != "moves") return;
+    while (is >> token) {
+        Move m = parse_uci_move(pos, token);
+        if (m == NULL_MOVE) return;
+        std::vector<Move> legal;
+        generate_moves(pos, legal);
+        if (std::find(legal.begin(), legal.end(), m) == legal.end()) return;
+        UndoInfo u;
+        pos.make_move(m, u);  // UndoInfo discarded — moves are cumulative
+    }
 }
 
 // Default depth ceiling when the GUI specifies neither `depth` nor

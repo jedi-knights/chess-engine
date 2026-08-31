@@ -164,6 +164,77 @@ TEST_CASE("explicit movetime overrides clock-derived movetime") {
     CHECK_FALSE(contains(out, "bestmove 0000"));
 }
 
+TEST_CASE("position startpos moves e2e4 → board reflects the applied move") {
+    // After 1. e4, black should be to move and the e2 pawn should be on e4.
+    // The `d` command's FEN output is our observable — it round-trips the
+    // full position state including side-to-move and ep_square.
+    std::string out = run_session(
+        "position startpos moves e2e4\n"
+        "d\n"
+        "quit\n");
+    CHECK(contains(out, "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"));
+}
+
+TEST_CASE("position startpos moves ... applies a multi-move sequence") {
+    // Ruy Lopez opening moves. Each move must land at its expected square
+    // for the final FEN to match — a bug in any intermediate move breaks
+    // the string comparison.
+    std::string out = run_session(
+        "position startpos moves e2e4 e7e5 g1f3 b8c6 f1b5\n"
+        "d\n"
+        "quit\n");
+    CHECK(contains(out,
+        "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3"));
+}
+
+TEST_CASE("position moves handles promotion syntax (a7a8q)") {
+    // Pawn promotes to queen on the last move.
+    std::string out = run_session(
+        "position fen 4k3/P7/8/8/8/8/8/4K3 w - - 0 1 moves a7a8q\n"
+        "d\n"
+        "quit\n");
+    CHECK(contains(out, "Q3k3/8/8/8/8/8/8/4K3 b - - 0 1"));
+}
+
+TEST_CASE("position moves handles castling syntax (e1g1)") {
+    std::string out = run_session(
+        "position fen 4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1 moves e1g1\n"
+        "d\n"
+        "quit\n");
+    CHECK(contains(out, "4k3/8/8/8/8/8/8/R4RK1 b - - 1 1"));
+}
+
+TEST_CASE("position moves handles en passant (d5c6 with ep set)") {
+    std::string out = run_session(
+        "position fen 4k3/8/8/2pP4/8/8/8/4K3 w - c6 0 1 moves d5c6\n"
+        "d\n"
+        "quit\n");
+    CHECK(contains(out, "4k3/8/2P5/8/8/8/8/4K3 b - - 0 1"));
+}
+
+TEST_CASE("position moves silently stops on a bogus move token") {
+    // The engine should apply moves up to the first bad token and then
+    // stop — dropping the tail is safer than either crashing or picking
+    // some fake substitute. After "e2e4 nonsense f2f4", position should
+    // reflect only e2e4.
+    std::string out = run_session(
+        "position startpos moves e2e4 nonsense f2f4\n"
+        "d\n"
+        "quit\n");
+    CHECK(contains(out, "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"));
+}
+
+TEST_CASE("go after position moves searches from the resulting position") {
+    // Full integration: load a position via moves, then search. The
+    // engine must consider the post-move position, not startpos.
+    std::string out = run_session(
+        "position startpos moves e2e4 e7e5\n"
+        "go depth 2\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
 TEST_CASE("wtime is used when white to move; btime when black") {
     // Both sides get near-zero on their own clock but plenty on the
     // opponent's. If we correctly pick the mover's clock, both cases

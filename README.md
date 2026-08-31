@@ -53,7 +53,7 @@ Currently implemented (all 8 milestones complete):
 - Perft driver and 6-position standard test suite
 - Material evaluation (centipawns, from side-to-move perspective)
 - **Iterative-deepening negamax with alpha-beta pruning** + **quiescence search** at leaves (extends captures until quiet, resolves horizon-effect blunders) + **MVV-LVA move ordering** + **Zobrist-hashed transposition table** (~1M entries, EXACT/LOWER/UPPER bounds, mate-score ply adjustment) + **killer moves and history heuristic** (order quiet-move beta-cutoffs first); ~11.6× speedup over baseline alpha-beta at depth 6; supports `go movetime N` with mid-iteration cancellation (any-time property); `ucinewgame` clears the TT
-- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen]`, `go [depth N]`, `d`, `quit`) with `info` and `bestmove` output
+- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`, `d`, `quit`) with per-iteration `info` lines and `bestmove` output
 - doctest unit test suite (64 cases) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
 Post-roadmap ideas (see CLAUDE.md): iterative deepening + time management, move ordering (MVV-LVA / killers / history), quiescence search, transposition table with Zobrist hashing, magic bitboards, piece-square tables, `position ... moves e2e4 ...` UCI extension.
