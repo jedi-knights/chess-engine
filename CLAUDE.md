@@ -39,7 +39,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 1. ✅ `Position::make_move` / `unmake_move` (supports all move types including ep, castling, promotion)
 2. ✅ Knight moves (no legality filter yet)
 3. ✅ King moves (no legality filter, no castling — those are 7 and 6)
-4. ⬜ Pawn moves (pushes, double, captures, ep, promotions)
+4. ✅ Pawn moves (pushes, double, captures, ep, promotions incl. underpromotion + capture-promotion)
 5. ⬜ Sliding pieces (naive rays first; magic bitboards later)
 6. ⬜ Castling
 7. ⬜ Legality filter (king-not-in-check after move)

@@ -2,7 +2,9 @@
 
 #include "attacks.h"
 #include "movegen.h"
+#include "perft.h"
 #include "position.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -190,4 +192,107 @@ TEST_CASE("nested make/unmake at depth 3 restores FEN") {
         REQUIRE(pos.set_from_fen(fen));
         walk(walk, pos, 3);
     }
+}
+
+// After milestone 4, startpos is fully covered by knight+king+pawn moves:
+// king is blocked so contributes 0, knights contribute 4, pawns 16 = 20.
+// Depth 2 = 20 * 20 because all 20 white replies leave a legal position
+// where black has 20 responses, and no legality-filtering is needed
+// (kings can't be captured within the search tree here).
+TEST_CASE("perft startpos matches after milestones 1-4") {
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    CHECK(perft(pos, 1) == 20);
+    CHECK(perft(pos, 2) == 400);
+}
+
+// Generator-shape tests: the perft counts above prove aggregate correctness,
+// but named tests document the specific behaviors that most commonly regress
+// during pawn work (double-push semantics, promotion fan-out, ep availability).
+
+static bool contains_move(const std::vector<Move>& moves, Move needle) {
+    return std::find(moves.begin(), moves.end(), needle) != moves.end();
+}
+
+TEST_CASE("pawn: double push generates the correct destination and ep pairing") {
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    // Every white pawn on rank 2 has both a single and a double push in startpos.
+    for (int f = 0; f < 8; ++f) {
+        Square from    = make_square(File(f), RANK_2);
+        Square single  = make_square(File(f), RANK_3);
+        Square dbl     = make_square(File(f), RANK_4);
+        INFO("file " << f);
+        CHECK(contains_move(moves, ::make_move(from, single)));
+        CHECK(contains_move(moves, ::make_move(from, dbl)));
+    }
+}
+
+TEST_CASE("pawn: en passant emitted only when ep_square is set and reachable") {
+    // White pawn on e5, black pawn on d5, ep square d6 (i.e. black just played d7-d5).
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(E5, D6, MT_EN_PASSANT)));
+
+    // Same board but no ep_square recorded — the ep move must not appear.
+    Position no_ep;
+    REQUIRE(no_ep.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - - 0 1"));
+    moves.clear();
+    generate_moves(no_ep, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E5, D6, MT_EN_PASSANT)));
+}
+
+TEST_CASE("pawn: promotion fan-out emits all four piece types (push and capture)") {
+    // Push promotion: white pawn on a7 can promote to Q/R/B/N on a8.
+    Position push_pos;
+    REQUIRE(push_pos.set_from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(push_pos, moves);
+    for (PieceType pt : {QUEEN, ROOK, BISHOP, KNIGHT}) {
+        INFO("push-promotion piece: " << int(pt));
+        CHECK(contains_move(moves, ::make_move(A7, A8, MT_PROMOTION, pt)));
+    }
+
+    // Capture-promotion: pawn on a7 captures rook on b8, promoting.
+    Position cap_pos;
+    REQUIRE(cap_pos.set_from_fen("1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1"));
+    moves.clear();
+    generate_moves(cap_pos, moves);
+    for (PieceType pt : {QUEEN, ROOK, BISHOP, KNIGHT}) {
+        INFO("capture-promotion piece: " << int(pt));
+        CHECK(contains_move(moves, ::make_move(A7, B8, MT_PROMOTION, pt)));
+    }
+}
+
+TEST_CASE("pawn: single push blocked by any piece (own or enemy)") {
+    // White pawn on e2, blocker on e3 (own knight) — no single or double push.
+    Position blocked;
+    REQUIRE(blocked.set_from_fen("4k3/8/8/8/8/4N3/4P3/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(blocked, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E2, E3)));
+    CHECK_FALSE(contains_move(moves, ::make_move(E2, E4)));
+
+    // Double push blocked by piece on e3 even though e4 is empty.
+    Position blocked_dbl;
+    REQUIRE(blocked_dbl.set_from_fen("4k3/8/8/8/8/4p3/4P3/4K3 w - - 0 1"));
+    moves.clear();
+    generate_moves(blocked_dbl, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E2, E4)));
+}
+
+TEST_CASE("pawn: file-wrap guard — a-file pawn has no NW capture, h-file no NE") {
+    // Black pieces adjacent to hypothetical wrap targets to make wrap bugs visible.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/7p/P6P/4K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    // Would-be-wraparound bits: A2 << 7 = H2 (own piece here anyway),
+    // H2 << 9 = A3 (empty). Neither should show up as a pawn capture.
+    CHECK_FALSE(contains_move(moves, ::make_move(A2, H2)));
+    CHECK_FALSE(contains_move(moves, ::make_move(H2, A3)));
 }
