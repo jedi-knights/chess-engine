@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 
 int main(int argc, char** argv) {
     init_attacks();
@@ -14,6 +15,6 @@ int main(int argc, char** argv) {
         return run_perft_suite(depth) ? 0 : 1;
     }
 
-    uci_loop();
+    uci_loop(std::cin, std::cout);
     return 0;
 }

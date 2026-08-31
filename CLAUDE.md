@@ -57,6 +57,7 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
     - `tests/test_position.cpp` ↔ `src/position.[h|cpp]` (FEN + make/unmake forward-correctness only)
     - `tests/test_movegen.cpp`  ↔ `src/movegen.[h|cpp]` (generator shape + movegen-driven make/unmake walks)
     - `tests/test_perft.cpp`    ↔ `src/perft.[h|cpp]`
+    - `tests/test_uci.cpp`      ↔ `src/uci.[h|cpp]` (protocol via stringstream — `uci_loop` takes `std::istream&/std::ostream&` for exactly this reason; do not reintroduce `std::cin`/`std::cout` inside the loop)
   New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`.
 - `tests/test_main.cpp` uses `DOCTEST_CONFIG_IMPLEMENT` and provides `main()` — this is the single place where `init_attacks()` is called so per-TU static-init hacks are unnecessary.
 - Tests link the whole `src/` tree (except `main.cpp`) — see Makefile `$(TEST_SRCS)`.

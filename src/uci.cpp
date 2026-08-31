@@ -6,14 +6,14 @@
 #include <string>
 #include <vector>
 
-static void cmd_uci() {
-    std::cout << "id name jedi-engine 0.0.1\n"
-              << "id author omar\n"
-              << "uciok\n" << std::flush;
+static void cmd_uci(std::ostream& out) {
+    out << "id name jedi-engine 0.0.1\n"
+        << "id author omar\n"
+        << "uciok\n" << std::flush;
 }
 
-static void cmd_isready() {
-    std::cout << "readyok\n" << std::flush;
+static void cmd_isready(std::ostream& out) {
+    out << "readyok\n" << std::flush;
 }
 
 static void cmd_position(std::istringstream& is, Position& pos) {
@@ -35,29 +35,29 @@ static void cmd_position(std::istringstream& is, Position& pos) {
     while (is >> token) { /* drain */ }
 }
 
-static void cmd_go(const Position& pos) {
+static void cmd_go(const Position& pos, std::ostream& out) {
     // TODO: real search. For now, always emit a null bestmove so a GUI
     //       will not hang waiting for a response.
     std::vector<Move> moves;
     generate_moves(pos, moves);
-    std::cout << "bestmove 0000\n" << std::flush;
+    out << "bestmove 0000\n" << std::flush;
 }
 
-void uci_loop() {
+void uci_loop(std::istream& in, std::ostream& out) {
     Position pos;
     pos.set_from_fen(STARTPOS_FEN);
 
     std::string line;
-    while (std::getline(std::cin, line)) {
+    while (std::getline(in, line)) {
         std::istringstream is(line);
         std::string cmd;
         is >> cmd;
-        if      (cmd == "uci")        cmd_uci();
-        else if (cmd == "isready")    cmd_isready();
+        if      (cmd == "uci")        cmd_uci(out);
+        else if (cmd == "isready")    cmd_isready(out);
         else if (cmd == "ucinewgame") pos.set_from_fen(STARTPOS_FEN);
         else if (cmd == "position")   cmd_position(is, pos);
-        else if (cmd == "go")         cmd_go(pos);
-        else if (cmd == "d")          std::cout << pos.pretty() << std::flush;
+        else if (cmd == "go")         cmd_go(pos, out);
+        else if (cmd == "d")          out << pos.pretty() << std::flush;
         else if (cmd == "quit")       break;
     }
 }
