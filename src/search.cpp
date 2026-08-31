@@ -2,6 +2,7 @@
 #include "eval.h"
 #include "movegen.h"
 
+#include <algorithm>
 #include <chrono>
 #include <vector>
 
@@ -37,6 +38,47 @@ bool time_up(SearchContext& ctx) {
 bool is_capture(const Position& pos, Move m) {
     if (move_type(m) == MT_EN_PASSANT) return true;
     return pos.board[move_to(m)] != NO_PIECE;
+}
+
+// Ordering scores. Centipawn values chosen so the "victim" bump dominates
+// even the largest attacker adjustment: PxQ (900*10 - 100 = 8900) beats
+// QxP (100*10 - 900 = 100) by nearly two orders of magnitude, so full
+// MVV-LVA ordering falls out of a single subtraction.
+constexpr int PIECE_ORDER_VALUE[NUM_PIECE_TYPES] = {
+    0, 100, 320, 330, 500, 900, 20000,   // K high — captures on king shouldn't occur but guard anyway
+};
+
+// Assign a comparable score to a move for ordering. Captures score in the
+// tens of thousands (well above any non-capture), promotions add on top,
+// non-captures score 0.
+int move_ordering_score(const Position& pos, Move m) {
+    int score = 0;
+    if (is_capture(pos, m)) {
+        PieceType victim = (move_type(m) == MT_EN_PASSANT)
+            ? PAWN
+            : type_of(pos.board[move_to(m)]);
+        PieceType attacker = type_of(pos.board[move_from(m)]);
+        // Base ensures every capture outranks every quiet move even when
+        // victim < attacker (e.g., QxP: 100*10 - 900 = 100, still + 100000).
+        score = 100000 + PIECE_ORDER_VALUE[victim] * 10 - PIECE_ORDER_VALUE[attacker];
+    }
+    if (move_type(m) == MT_PROMOTION) {
+        // Prefer queen promotions first; treat under-promotions as tie-broken
+        // by the promotion piece's own value.
+        score += PIECE_ORDER_VALUE[move_promotion(m)];
+    }
+    return score;
+}
+
+// In-place descending sort by move_ordering_score. std::sort is O(N log N)
+// per call — fine at chess branching factors (~30-40 moves). Could later
+// be replaced with a lazy "pick next best" that avoids sorting the full
+// list when a beta cutoff happens early.
+void order_moves(const Position& pos, std::vector<Move>& moves) {
+    std::sort(moves.begin(), moves.end(),
+              [&](Move a, Move b) {
+                  return move_ordering_score(pos, a) > move_ordering_score(pos, b);
+              });
 }
 
 // Quiescence search: extend the main search at leaf nodes with capture
@@ -76,6 +118,10 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
         return checked ? (-MATE_SCORE + ply) : 0;
     }
 
+    // MVV-LVA: try highest-victim captures first so the strong replies
+    // trigger beta cutoffs immediately.
+    order_moves(pos, moves);
+
     for (Move m : moves) {
         // Non-captures are only searched when we're evading check; otherwise
         // they don't help resolve the tactical sequence we entered qsearch
@@ -112,6 +158,8 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return 0;   // stalemate
     }
 
+    order_moves(pos, moves);
+
     int best = -INF;
     for (Move m : moves) {
         UndoInfo u;
@@ -142,6 +190,8 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
         out.depth     = depth;
         return true;
     }
+
+    order_moves(pos, moves);
 
     int  alpha     = -INF;
     int  best      = -INF;

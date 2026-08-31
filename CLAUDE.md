@@ -51,7 +51,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 
 - ✅ Iterative deepening + `go movetime N` (any-time property, per-iteration `info` output). `search_best(pos, depth)` is preserved as a primitive; `search_iterative(pos, limits, callback)` is the production entry point.
 - ✅ Quiescence search — extends leaves with captures only until quiet; standpat gives a lower bound; in-check nodes skip standpat and consider all moves (evasion). Startpos scores now stay at 0 across depths (was ±100), and total node counts DROP at deeper depths because stable evals give tighter alpha-beta cutoffs.
-- Move ordering (MVV-LVA, killers, history) — currently O(branching^depth) with no ordering, so ID re-searches waste effort. Qsearch particularly benefits from MVV-LVA — trying the most valuable capture first massively improves cutoffs.
+- ✅ Move ordering — MVV-LVA at every search node (negamax, qsearch, root). Score = `100000 + victim_value * 10 - attacker_value` for captures, promotion piece value added on top, 0 for other quiet moves. Startpos depth-6 nodes dropped 316k → 184k (~42% cut on top of qsearch). Killers/history not yet.
 - `go infinite` + `stop` (needs an async cancellation signal, not just a deadline)
 - `go wtime W btime B` — compute movetime from remaining clock
 - Transposition table (Zobrist hashing) — ID benefits most from this since re-searches hit the same nodes

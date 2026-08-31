@@ -38,6 +38,12 @@ constexpr File file_of(Square s) { return File(s & 7); }
 constexpr Rank rank_of(Square s) { return Rank(s >> 3); }
 constexpr Square make_square(File f, Rank r) { return Square((r << 3) | f); }
 
+// Piece decomposition: Piece encodes color in the high bit (W_* = 1..6,
+// B_* = 9..14, gap at 7-8), so these run without a branch on typical
+// compilers. Undefined on NO_PIECE — callers should filter first.
+constexpr Color     color_of(Piece p) { return (p < B_PAWN) ? WHITE : BLACK; }
+constexpr PieceType type_of (Piece p) { return PieceType(p < B_PAWN ? p : p - 8); }
+
 // Move encoding: 16 bits.
 //   bits 0-5   : from square    (0-63)
 //   bits 6-11  : to square      (0-63)

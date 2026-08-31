@@ -110,11 +110,6 @@ std::string Position::to_fen() const {
     return o.str();
 }
 
-static constexpr Color color_of(Piece p) { return (p < B_PAWN) ? WHITE : BLACK; }
-static constexpr PieceType type_of(Piece p) {
-    return PieceType(p < B_PAWN ? p : p - 8);
-}
-
 // Bits cleared from `castling` when a piece leaves OR is captured on that
 // square. King-source and rook-source squares are the only entries that
 // differ from 15 (ALL_CASTLING). ANDing with CR_MASK[from] & CR_MASK[to]
