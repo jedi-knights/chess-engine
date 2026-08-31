@@ -37,8 +37,8 @@ third_party/
 Tracked in `src/movegen.h`. Each milestone is committed separately and validated by extending the perft depth that passes.
 
 1. ✅ `Position::make_move` / `unmake_move` (supports all move types including ep, castling, promotion)
-2. ⬜ Knight moves (partial — done but not legality-filtered)
-3. ⬜ King moves
+2. ✅ Knight moves (no legality filter yet)
+3. ✅ King moves (no legality filter, no castling — those are 7 and 6)
 4. ⬜ Pawn moves (pushes, double, captures, ep, promotions)
 5. ⬜ Sliding pieces (naive rays first; magic bitboards later)
 6. ⬜ Castling
