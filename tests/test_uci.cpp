@@ -56,12 +56,31 @@ TEST_CASE("ucinewgame resets to startpos after loading a different position") {
     CHECK(contains(out, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"));
 }
 
-TEST_CASE("go emits a bestmove line (currently the null move)") {
-    // Contract with any UCI GUI: `go` must always produce `bestmove <move>`
-    // so the GUI doesn't hang waiting. Search milestone will replace 0000
-    // with a real move — test asserts the line exists, not its content.
-    std::string out = run_session("position startpos\ngo\nquit\n");
+TEST_CASE("go emits an info line and a bestmove line") {
+    // UCI contract: `go` must produce `bestmove <move>` so the GUI doesn't
+    // hang. After milestone 8 it also produces an `info` line (depth,
+    // score, nodes, pv) before the bestmove.
+    std::string out = run_session("position startpos\ngo depth 2\nquit\n");
+    CHECK(contains(out, "info depth 2"));
+    CHECK(contains(out, "score cp "));
+    CHECK(contains(out, "nodes "));
     CHECK(contains(out, "bestmove "));
+    // Bestmove must not be the null-move sentinel — startpos has 20 legal moves.
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("go on a mated position emits bestmove 0000") {
+    // No legal moves → NULL_MOVE → serialized as "0000" per UCI convention.
+    std::string out = run_session(
+        "position fen 4k3/8/8/8/8/8/6PP/5r1K w - - 0 1\n"
+        "go depth 1\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("go depth parameter controls search depth reported in info") {
+    std::string out = run_session("position startpos\ngo depth 1\nquit\n");
+    CHECK(contains(out, "info depth 1"));
 }
 
 TEST_CASE("quit alone terminates the loop without output") {

@@ -23,9 +23,11 @@ src/                engine sources
   bitboard.[h|cpp]  popcount, lsb, pretty
   attacks.[h|cpp]   precomputed leaper attack tables (knight/king/pawn)
   position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo
-  movegen.[h|cpp]   generate_moves — currently knights only, milestones in header
+  movegen.[h|cpp]   generate_moves (legal moves) + in_check helper
   perft.[h|cpp]     perft driver + 6-position standard suite
-  uci.[h|cpp]       UCI protocol loop
+  eval.[h|cpp]      static material evaluation (side-to-move perspective)
+  search.[h|cpp]    fixed-depth negamax + alpha-beta; SearchResult return
+  uci.[h|cpp]       UCI protocol loop; move_to_uci notation helper
   main.cpp          entry (dispatches `perft` subcommand or falls into UCI)
 tests/              doctest suite; one file per src unit under test
 third_party/
@@ -43,7 +45,17 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 5. ✅ Sliding pieces — bishop, rook, queen (naive per-step rays; magic bitboards deferred)
 6. ✅ Castling (rights + emptiness + king start/transit/land squares not attacked)
 7. ✅ Legality filter — make/unmake round-trip + `is_square_attacked` on own king. **All 6 standard perft positions match through depth 4** (~10.7M node checks) — move generation is provably correct.
-8. ⬜ Search in `cmd_go` (negamax + alpha-beta; needs an evaluation function)
+8. ✅ Search — material eval + negamax with alpha-beta. `cmd_go` parses `depth N`, emits UCI `info depth/score/nodes/pv` and `bestmove`. Default search depth 4. Distinguishes checkmate (`-MATE_SCORE + ply`, so shorter mates score higher) from stalemate (0).
+
+## Post-roadmap next steps (each is an independent PR)
+
+- Iterative deepening (`go movetime` / `go infinite` support)
+- Move ordering (MVV-LVA, killers, history) — currently O(branching^depth) with no ordering
+- Quiescence search — stop only at "quiet" leaves to avoid horizon-effect blunders on captures
+- Transposition table (Zobrist hashing)
+- Magic bitboards for slider attacks
+- Piece-square tables in eval
+- UCI `position ... moves e2e4 ...` — needs a `parse_uci_move` helper
 
 Do not skip a milestone. Perft numbers stay artificially low until every piece type generates, but each milestone's *round-trip* invariants (see `tests/test_position.cpp`) must hold before advancing.
 

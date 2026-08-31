@@ -224,6 +224,13 @@ bool is_legal(Position& pos, Move m) {
 
 }  // namespace
 
+bool in_check(const Position& pos) {
+    Bitboard king_bb = pos.pieces[pos.side_to_move][KING];
+    if (!king_bb) return false;   // artificial no-king test positions
+    return is_square_attacked(pos, lsb(king_bb),
+                              Color(pos.side_to_move ^ 1));
+}
+
 void generate_moves(Position& pos, std::vector<Move>& moves) {
     const Color    us         = pos.side_to_move;
     const Bitboard our_pieces = pos.colors[us];

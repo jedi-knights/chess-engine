@@ -43,7 +43,7 @@ $ ./engine perft 2 | grep "Startpos" -A 2
 
 ## Features
 
-Currently implemented (movegen milestones 1-7 complete):
+Currently implemented (all 8 milestones complete):
 
 - Bitboard position representation (piece mailbox + per-color/per-type bitboards + occupancy)
 - FEN parsing and emission (round-tripped by the test suite)
@@ -51,10 +51,12 @@ Currently implemented (movegen milestones 1-7 complete):
 - **Fully legal** move generation for all piece types (knights, king, pawns with all special cases, sliders, castling) with a king-not-in-check legality filter. Perft matches the six standard positions through depth 4 (~10.7M node checks).
 - Precomputed leaper attack tables (knight, king, pawn)
 - Perft driver and 6-position standard test suite
-- UCI protocol scaffold (`uci`, `isready`, `ucinewgame`, `position`, `go`, `d`, `quit`)
-- doctest unit test suite compiled with AddressSanitizer + UndefinedBehaviorSanitizer
+- Material evaluation (centipawns, from side-to-move perspective)
+- Fixed-depth **negamax with alpha-beta pruning**; distinguishes checkmate from stalemate; prefers shorter mates
+- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen]`, `go [depth N]`, `d`, `quit`) with `info` and `bestmove` output
+- doctest unit test suite (64 cases) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
-Coming (see the [milestone roadmap](CLAUDE.md#movegen-milestone-roadmap)): negamax + alpha-beta search, material evaluation, magic bitboards for slider attack speedup.
+Post-roadmap ideas (see CLAUDE.md): iterative deepening + time management, move ordering (MVV-LVA / killers / history), quiescence search, transposition table with Zobrist hashing, magic bitboards, piece-square tables, `position ... moves e2e4 ...` UCI extension.
 
 ## Requirements
 
@@ -87,7 +89,7 @@ quit
 
 Any UCI-compatible GUI (Arena, Cute Chess, Banksia, ChessBase) can drive it as an engine binary. Point the GUI at the compiled `./engine`.
 
-**Note:** the `go` command currently returns `bestmove 0000` — search is not implemented yet (milestone 8 of the roadmap).
+The `go` command runs a fixed-depth alpha-beta search (default depth 4; override with `go depth N`). Search returns a `bestmove` and a UCI `info` line with depth, centipawn score, node count, and the root move as PV.
 
 ## Examples
 
