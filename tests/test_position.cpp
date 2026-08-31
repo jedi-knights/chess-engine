@@ -285,6 +285,76 @@ TEST_CASE("pawn: single push blocked by any piece (own or enemy)") {
     CHECK_FALSE(contains_move(moves, ::make_move(E2, E4)));
 }
 
+// Count how many generated moves originate from `from`. Useful for slider
+// shape assertions where the position isolates one piece we care about.
+static int count_moves_from(const std::vector<Move>& moves, Square from) {
+    int n = 0;
+    for (Move m : moves) if (move_from(m) == from) ++n;
+    return n;
+}
+
+TEST_CASE("slider: rook on empty board covers 14 squares from d4") {
+    // Kings tucked in corners so they don't interfere with the rook rays.
+    Position pos;
+    REQUIRE(pos.set_from_fen("k7/8/8/8/3R4/8/8/7K w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(count_moves_from(moves, D4) == 14);
+    // Spot-check endpoints in each direction.
+    CHECK(contains_move(moves, ::make_move(D4, D8)));   // N to edge
+    CHECK(contains_move(moves, ::make_move(D4, D1)));   // S to edge
+    CHECK(contains_move(moves, ::make_move(D4, A4)));   // W to edge
+    CHECK(contains_move(moves, ::make_move(D4, H4)));   // E to edge
+    // Diagonal move must NOT appear — this is a rook, not a queen.
+    CHECK_FALSE(contains_move(moves, ::make_move(D4, E5)));
+}
+
+TEST_CASE("slider: bishop on empty board covers 13 squares from d4") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("k7/8/8/8/3B4/8/8/7K w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(count_moves_from(moves, D4) == 13);
+    CHECK(contains_move(moves, ::make_move(D4, H8)));   // NE
+    CHECK(contains_move(moves, ::make_move(D4, A7)));   // NW
+    CHECK(contains_move(moves, ::make_move(D4, G1)));   // SE
+    CHECK(contains_move(moves, ::make_move(D4, A1)));   // SW
+    // Orthogonal move must NOT appear.
+    CHECK_FALSE(contains_move(moves, ::make_move(D4, D5)));
+}
+
+TEST_CASE("slider: queen on empty board covers 27 squares from d4 (14+13)") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("k7/8/8/8/3Q4/8/8/7K w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(count_moves_from(moves, D4) == 27);
+}
+
+TEST_CASE("slider: own piece blocks, ray stops before the blocker") {
+    // White rook a1, white pawn a4. Rook should reach a2, a3 — not a4.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/P7/8/8/R3K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(A1, A2)));
+    CHECK(contains_move(moves, ::make_move(A1, A3)));
+    CHECK_FALSE(contains_move(moves, ::make_move(A1, A4)));
+    CHECK_FALSE(contains_move(moves, ::make_move(A1, A5)));
+}
+
+TEST_CASE("slider: enemy piece is captured and ray stops") {
+    // White rook a1, black pawn a4. Rook should reach a2, a3, a4 — not a5.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/p7/8/8/R3K3 w - - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(A1, A2)));
+    CHECK(contains_move(moves, ::make_move(A1, A3)));
+    CHECK(contains_move(moves, ::make_move(A1, A4)));      // capture
+    CHECK_FALSE(contains_move(moves, ::make_move(A1, A5))); // ray stopped
+}
+
 TEST_CASE("pawn: file-wrap guard — a-file pawn has no NW capture, h-file no NE") {
     // Black pieces adjacent to hypothetical wrap targets to make wrap bugs visible.
     Position pos;

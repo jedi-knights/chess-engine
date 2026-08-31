@@ -89,6 +89,52 @@ void generate_pawn_moves(const Position& pos, std::vector<Move>& moves) {
     }
 }
 
+// Walk one ray from `from` in direction (df, dr) one square at a time.
+// Stops at: board edge, own piece (exclude destination), enemy piece
+// (include as capture, then stop). Naive per-step iteration — magic
+// bitboards can replace this later without touching callers.
+void gen_ray(Square from, int df, int dr,
+             Bitboard our, Bitboard enemy,
+             std::vector<Move>& moves) {
+    int f = file_of(from) + df;
+    int r = rank_of(from) + dr;
+    while (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
+        Square   to    = make_square(File(f), Rank(r));
+        Bitboard to_bb = square_bb(to);
+        if (to_bb & our)   return;              // own piece blocks
+        moves.push_back(make_move(from, to));
+        if (to_bb & enemy) return;              // captured — ray stops
+        f += df;
+        r += dr;
+    }
+}
+
+void generate_slider_moves(const Position& pos, std::vector<Move>& moves) {
+    const Color    us    = pos.side_to_move;
+    const Bitboard our   = pos.colors[us];
+    const Bitboard enemy = pos.colors[Color(us ^ 1)];
+
+    // Bishops and queens share diagonal rays; rooks and queens share
+    // orthogonal rays. OR the piece bitboards to iterate each set once.
+    Bitboard diag = pos.pieces[us][BISHOP] | pos.pieces[us][QUEEN];
+    while (diag) {
+        Square from = pop_lsb(diag);
+        gen_ray(from,  1,  1, our, enemy, moves);   // NE
+        gen_ray(from, -1,  1, our, enemy, moves);   // NW
+        gen_ray(from,  1, -1, our, enemy, moves);   // SE
+        gen_ray(from, -1, -1, our, enemy, moves);   // SW
+    }
+
+    Bitboard orth = pos.pieces[us][ROOK] | pos.pieces[us][QUEEN];
+    while (orth) {
+        Square from = pop_lsb(orth);
+        gen_ray(from,  1,  0, our, enemy, moves);   // E
+        gen_ray(from, -1,  0, our, enemy, moves);   // W
+        gen_ray(from,  0,  1, our, enemy, moves);   // N
+        gen_ray(from,  0, -1, our, enemy, moves);   // S
+    }
+}
+
 }  // namespace
 
 void generate_moves(const Position& pos, std::vector<Move>& moves) {
@@ -119,6 +165,7 @@ void generate_moves(const Position& pos, std::vector<Move>& moves) {
     }
 
     generate_pawn_moves(pos, moves);
+    generate_slider_moves(pos, moves);
 
-    // TODO: sliders, castling — see movegen.h milestones.
+    // TODO: castling — see movegen.h milestones.
 }
