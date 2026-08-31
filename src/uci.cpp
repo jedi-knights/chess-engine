@@ -59,27 +59,79 @@ void cmd_position(std::istringstream& is, Position& pos) {
 // `movetime`. Small enough to finish in well under a second even in a
 // debug build.
 constexpr int DEFAULT_DEPTH = 4;
-// When the GUI specifies `movetime` but no explicit depth, iterative
-// deepening runs until time is up — cap at a depth that would take
-// well beyond any practical think-time on this engine's speed.
+// When the GUI specifies `movetime` (or clock args) but no explicit
+// depth, iterative deepening runs until time is up — cap at a depth
+// that would take well beyond any practical think-time on this engine.
 constexpr int MOVETIME_MAX_DEPTH = 64;
+
+// Compute how long to spend on this move given the clock. Uses the
+// classical divisor approach: budget ≈ remaining / (movestogo + slack),
+// plus most of the increment (which is "free" — it refills the clock).
+// Under sudden death (movestogo == 0), guess ~30 more moves ahead.
+//
+// Safety margins are conservative — losing on time is a categorical
+// failure and the search's own polling granularity (1024 nodes) plus
+// scheduler latency can easily overshoot the deadline by 10-50 ms.
+int compute_movetime(int remaining_ms, int increment_ms, int movestogo) {
+    constexpr int SAFETY_BUFFER_MS = 100;
+    int budget = remaining_ms - SAFETY_BUFFER_MS;
+    if (budget <= 0) return 1;                     // out of time — play instantly
+
+    int moves_left = (movestogo > 0) ? movestogo : 30;
+    int base       = budget / (moves_left + 2);   // +2 keeps some in reserve
+
+    // Increments come back after the move, so spending them doesn't
+    // shrink the clock — take most of the increment on every move.
+    int inc        = (increment_ms * 3) / 4;
+
+    int movetime   = base + inc;
+
+    // Hard cap: never spend more than a third of remaining time on one
+    // move, even under aggressive time controls or slow-search bugs.
+    int hard_cap   = budget / 3;
+    if (movetime > hard_cap) movetime = hard_cap;
+
+    // Floor at a few ms so search always runs at least depth 1 (which
+    // guarantees a legal bestmove for the UCI contract).
+    if (movetime < 5)        movetime = 5;
+    return movetime;
+}
 
 void cmd_go(std::istringstream& is, Position& pos, std::ostream& out) {
     SearchLimits limits;
     bool depth_set = false, movetime_set = false;
+    int  wtime = 0, btime = 0, winc = 0, binc = 0, movestogo = 0;
+    bool clock_given = false;
+
     std::string token;
+    auto next_int = [&](int& out_value) {
+        if (!(is >> token)) return false;
+        try { out_value = std::stoi(token); return true; }
+        catch (...) { return false; }
+    };
+
     while (is >> token) {
-        if (token == "depth" && (is >> token)) {
-            try { limits.max_depth = std::stoi(token); depth_set = true; }
-            catch (...) { /* ignore malformed value, keep default */ }
-        } else if (token == "movetime" && (is >> token)) {
-            try { limits.movetime_ms = std::stoi(token); movetime_set = true; }
-            catch (...) { /* ignore malformed value */ }
-        }
-        // TODO: wtime/btime, infinite — later.
+        if      (token == "depth")     { int v; if (next_int(v)) { limits.max_depth = v; depth_set = true; } }
+        else if (token == "movetime")  { int v; if (next_int(v)) { limits.movetime_ms = v; movetime_set = true; } }
+        else if (token == "wtime")     { if (next_int(wtime)) clock_given = true; }
+        else if (token == "btime")     { if (next_int(btime)) clock_given = true; }
+        else if (token == "winc")      { next_int(winc); }
+        else if (token == "binc")      { next_int(binc); }
+        else if (token == "movestogo") { next_int(movestogo); }
+        // TODO: `infinite`, `nodes`, `mate` — later.
     }
+
+    // Explicit movetime wins over clock-derived time (both may be set;
+    // GUIs sometimes send both for redundancy). Only fall back to clock
+    // computation when the GUI didn't specify a fixed movetime.
+    if (!movetime_set && clock_given) {
+        int remaining = (pos.side_to_move == WHITE) ? wtime : btime;
+        int increment = (pos.side_to_move == WHITE) ? winc  : binc;
+        limits.movetime_ms = compute_movetime(remaining, increment, movestogo);
+    }
+
     if (!depth_set) {
-        limits.max_depth = movetime_set ? MOVETIME_MAX_DEPTH : DEFAULT_DEPTH;
+        limits.max_depth = (limits.movetime_ms > 0) ? MOVETIME_MAX_DEPTH : DEFAULT_DEPTH;
     }
 
     SearchResult r = search_iterative(pos, limits,

@@ -89,7 +89,14 @@ quit
 
 Any UCI-compatible GUI (Arena, Cute Chess, Banksia, ChessBase) can drive it as an engine binary. Point the GUI at the compiled `./engine`.
 
-The `go` command runs iterative-deepening alpha-beta search. Default depth 4; override with `go depth N` or use `go movetime N` (milliseconds) for time-controlled search. Each completed depth emits a UCI `info` line with depth, centipawn score, node count, and the root move as PV, followed by a `bestmove`.
+The `go` command runs iterative-deepening alpha-beta search. Supported forms:
+
+- `go depth N` — search to a fixed depth
+- `go movetime N` — search until N milliseconds elapse (any-time; deepest completed iteration wins)
+- `go wtime W btime B [winc I] [binc I] [movestogo N]` — derive movetime from the clock for the side to move. Sudden death (no `movestogo`) assumes ~30 more moves. Increment is spent generously since it refills the clock.
+- `go` (no args) — default depth 4
+
+Each completed depth emits a UCI `info` line with depth, centipawn score, node count, and the root move as PV, followed by `bestmove`.
 
 ## Examples
 

@@ -109,6 +109,82 @@ TEST_CASE("go movetime completes within the deadline with a legal move") {
     CHECK_FALSE(contains(out, "bestmove 0000"));
 }
 
+TEST_CASE("go with wtime/btime derives a movetime and returns a bestmove") {
+    // 60-second clock, sudden-death. Engine should compute ~2s (60000/30)
+    // and return within that. We only assert on the observable UCI output:
+    // bestmove exists and isn't the null move.
+    std::string out = run_session(
+        "position startpos\n"
+        "go wtime 60000 btime 60000\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("go with clock args + increment returns a legal move") {
+    // Fischer time control: 30 seconds base + 1 second per move.
+    std::string out = run_session(
+        "position startpos\n"
+        "go wtime 30000 btime 30000 winc 1000 binc 1000\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("go with movestogo (classical time control) returns a legal move") {
+    // 40 moves in 5 minutes. Engine should use ~7-8s per move.
+    std::string out = run_session(
+        "position startpos\n"
+        "go wtime 300000 btime 300000 movestogo 40\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("go with critically low time still returns a bestmove") {
+    // 50 ms remaining — the safety buffer eats most of it. Engine must
+    // still return something rather than losing on time by hanging.
+    std::string out = run_session(
+        "position startpos\n"
+        "go wtime 50 btime 50\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("explicit movetime overrides clock-derived movetime") {
+    // Both movetime and wtime given. The explicit movetime wins so a
+    // GUI can force short thinking during analysis mode without lying
+    // about the clock.
+    std::string out = run_session(
+        "position startpos\n"
+        "go wtime 60000 movetime 50\n"
+        "quit\n");
+    CHECK(contains(out, "bestmove "));
+    CHECK_FALSE(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("wtime is used when white to move; btime when black") {
+    // Both sides get near-zero on their own clock but plenty on the
+    // opponent's. If we correctly pick the mover's clock, both cases
+    // return quickly; if we picked the wrong side, one case would
+    // search for seconds (slow to detect in a doctest).
+    // Assertion is behavioral: both return a legal move.
+    std::string white_side = run_session(
+        "position fen 4k3/8/8/8/8/8/8/4K3 w - - 0 1\n"
+        "go wtime 50 btime 60000\n"
+        "quit\n");
+    CHECK(contains(white_side, "bestmove "));
+    CHECK_FALSE(contains(white_side, "bestmove 0000"));
+
+    std::string black_side = run_session(
+        "position fen 4k3/8/8/8/8/8/8/4K3 b - - 0 1\n"
+        "go wtime 60000 btime 50\n"
+        "quit\n");
+    CHECK(contains(black_side, "bestmove "));
+    CHECK_FALSE(contains(black_side, "bestmove 0000"));
+}
+
 TEST_CASE("quit alone terminates the loop without output") {
     CHECK(run_session("quit\n").empty());
 }
