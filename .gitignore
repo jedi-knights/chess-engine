@@ -1,4 +1,5 @@
 engine
+tests/run
 *.o
 *.d
 *.dSYM/
