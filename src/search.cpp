@@ -132,17 +132,32 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
     return score;
 }
 
-// In-place descending sort by move_ordering_score with TT-move / killer /
-// history hints woven in. std::sort is O(N log N) per call — cheap at
-// chess branching factors — but could later be replaced with a lazy
-// selection-sort that avoids sorting the tail after a beta cutoff.
-void order_moves(const Position& pos, MoveList& moves,
-                 Move tt_move, const SearchContext& ctx, int ply) {
-    std::sort(moves.begin(), moves.end(),
-              [&](Move a, Move b) {
-                  return move_ordering_score(pos, a, tt_move, ctx, ply)
-                       > move_ordering_score(pos, b, tt_move, ctx, ply);
-              });
+// Precompute ordering scores in parallel with the moves list. Called
+// once per node; the score for each move is then used by pick_move_to_front
+// without recomputing.
+void score_moves(const Position& pos, const MoveList& moves,
+                 int* scores, Move tt_move,
+                 const SearchContext& ctx, int ply) {
+    for (int i = 0; i < moves.size(); ++i) {
+        scores[i] = move_ordering_score(pos, moves[i], tt_move, ctx, ply);
+    }
+}
+
+// Selection-style "swap the highest-scoring remaining move into position
+// `start`" — the classic lazy alternative to full sort. When beta cutoff
+// ends the loop early, we never scan the tail; typical well-ordered
+// searches cut off on the first or second move, so most of the sort work
+// std::sort would have done is avoided outright.
+void pick_move_to_front(MoveList& moves, int* scores, int start) {
+    int best_i = start;
+    int best_s = scores[start];
+    for (int i = start + 1; i < moves.size(); ++i) {
+        if (scores[i] > best_s) { best_i = i; best_s = scores[i]; }
+    }
+    if (best_i != start) {
+        Move tm = moves[start];  moves[start]  = moves[best_i];  moves[best_i]  = tm;
+        int  ts = scores[start]; scores[start] = scores[best_i]; scores[best_i] = ts;
+    }
 }
 
 // Quiescence search: extend the main search at leaf nodes with capture
@@ -187,13 +202,17 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     // (leaves change rapidly and add little), so no move hint. Killers
     // and history are quiet-move heuristics — qsearch only searches
     // captures (except when in check) so they don't affect ordering here.
-    order_moves(pos, moves, NULL_MOVE, ctx, ply);
+    int scores[MoveList::MAX_MOVES];
+    score_moves(pos, moves, scores, NULL_MOVE, ctx, ply);
 
-    for (Move m : moves) {
-        // Non-captures are only searched when we're evading check; otherwise
-        // they don't help resolve the tactical sequence we entered qsearch
-        // to analyze, and searching them would defeat the point.
-        if (!checked && !is_capture(pos, m)) continue;
+    for (int i = 0; i < moves.size(); ++i) {
+        pick_move_to_front(moves, scores, i);
+        Move m = moves[i];
+        // When we're not in check, once scores drop below the capture band
+        // (base 1,000,000) every remaining move is quiet — no point picking
+        // and skipping them.
+        if (!checked && scores[i] < 1'000'000) break;
+        if (!checked && !is_capture(pos, m)) continue;   // safety guard
 
         UndoInfo u;
         pos.make_move(m, u);
@@ -233,12 +252,16 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return 0;   // stalemate
     }
 
-    order_moves(pos, moves, tt_move, ctx, ply);
+    int scores[MoveList::MAX_MOVES];
+    score_moves(pos, moves, scores, tt_move, ctx, ply);
 
     const int original_alpha = alpha;
     int  best      = -INF;
     Move best_move = NULL_MOVE;
-    for (Move m : moves) {
+    for (int i = 0; i < moves.size(); ++i) {
+        pick_move_to_front(moves, scores, i);
+        Move m = moves[i];
+
         UndoInfo u;
         pos.make_move(m, u);
         int score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
@@ -298,12 +321,16 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
     int  tt_score = 0;
     Move tt_move  = NULL_MOVE;
     tt().probe(pos.key, /*depth=*/0, -INF, INF, tt_score, tt_move);
-    order_moves(pos, moves, tt_move, ctx, /*ply=*/0);
+
+    int scores[MoveList::MAX_MOVES];
+    score_moves(pos, moves, scores, tt_move, ctx, /*ply=*/0);
 
     int  alpha     = -INF;
     int  best      = -INF;
     Move best_move = NULL_MOVE;
-    for (Move m : moves) {
+    for (int i = 0; i < moves.size(); ++i) {
+        pick_move_to_front(moves, scores, i);
+        Move m = moves[i];
         UndoInfo u;
         pos.make_move(m, u);
         int score = -negamax(pos, depth - 1, -INF, -alpha, 1, ctx);
