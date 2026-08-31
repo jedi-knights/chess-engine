@@ -41,7 +41,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 3. ✅ King moves (no legality filter, no castling — those are 7 and 6)
 4. ✅ Pawn moves (pushes, double, captures, ep, promotions incl. underpromotion + capture-promotion)
 5. ✅ Sliding pieces — bishop, rook, queen (naive per-step rays; magic bitboards deferred)
-6. ⬜ Castling
+6. ✅ Castling (rights + emptiness + king start/transit/land squares not attacked)
 7. ⬜ Legality filter (king-not-in-check after move)
 8. ⬜ Search in `cmd_go` (negamax + alpha-beta; blocked on full movegen + eval)
 

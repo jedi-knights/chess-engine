@@ -206,6 +206,26 @@ TEST_CASE("perft startpos matches after milestones 1-4") {
     CHECK(perft(pos, 2) == 400);
 }
 
+// After milestone 6 (castling), Kiwipete gains its two castling moves at
+// ply 1 and Position 5 gains its one. Both hit their standard perft depth-1
+// targets even without the general legality filter — the child positions
+// they generate are only reached at depth 2+.
+TEST_CASE("perft depth 1 matches for positions that don't need legality filter") {
+    struct Case { const char* name; const char* fen; uint64_t expected; };
+    const Case cases[] = {
+        {"Startpos",   STARTPOS_FEN, 20},
+        {"Position 6", "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 46},
+        {"Kiwipete",   "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 48},
+        {"Position 5", "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 44},
+    };
+    for (const auto& c : cases) {
+        Position pos;
+        REQUIRE(pos.set_from_fen(c.fen));
+        INFO("position: " << std::string(c.name));
+        CHECK(perft(pos, 1) == c.expected);
+    }
+}
+
 // Generator-shape tests: the perft counts above prove aggregate correctness,
 // but named tests document the specific behaviors that most commonly regress
 // during pawn work (double-push semantics, promotion fan-out, ep availability).
@@ -341,6 +361,75 @@ TEST_CASE("slider: own piece blocks, ray stops before the blocker") {
     CHECK(contains_move(moves, ::make_move(A1, A3)));
     CHECK_FALSE(contains_move(moves, ::make_move(A1, A4)));
     CHECK_FALSE(contains_move(moves, ::make_move(A1, A5)));
+}
+
+TEST_CASE("castling: both moves emitted when position is clean") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
+    CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
+}
+
+TEST_CASE("castling: missing right suppresses that side's move") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/R3K2R w Q - 0 1"));  // OOO only
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
+    CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
+}
+
+TEST_CASE("castling: squares between king and rook must be empty") {
+    // A knight on B1 blocks queenside rook's path; a bishop on F1 blocks kingside.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/RN2KB1R w KQ - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
+}
+
+TEST_CASE("castling: king in check disallows either side") {
+    // Black rook on E8 sees through empty e-file to E1.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4r3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
+}
+
+TEST_CASE("castling: transit square attack disallows only that side") {
+    // Black rook on F8 attacks F1 (king's kingside transit square).
+    // Queenside is unaffected — king transits through D1, which the rook doesn't hit.
+    Position pos;
+    REQUIRE(pos.set_from_fen("5r2/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK_FALSE(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
+    CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
+}
+
+TEST_CASE("castling: b1 attack does NOT disallow queenside (king doesn't pass through)") {
+    // Black rook on B8 attacks B1. B1 is between rook and king on the queenside,
+    // so it must be empty — but the king doesn't pass through it, so attack is OK.
+    Position pos;
+    REQUIRE(pos.set_from_fen("1r2k3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(E1, C1, MT_CASTLING)));
+    CHECK(contains_move(moves, ::make_move(E1, G1, MT_CASTLING)));
+}
+
+TEST_CASE("castling: black castles both sides symmetrically") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("r3k2r/8/8/8/8/8/8/4K3 b kq - 0 1"));
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
+    CHECK(contains_move(moves, ::make_move(E8, G8, MT_CASTLING)));
+    CHECK(contains_move(moves, ::make_move(E8, C8, MT_CASTLING)));
 }
 
 TEST_CASE("slider: enemy piece is captured and ray stops") {

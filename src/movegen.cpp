@@ -109,6 +109,74 @@ void gen_ray(Square from, int df, int dr,
     }
 }
 
+// Return true if the first piece encountered walking (df, dr) from `sq`
+// is one of `attackers`. Used by is_square_attacked to detect sliding
+// threats without generating a move list.
+bool ray_hits_attacker(Square sq, int df, int dr,
+                       Bitboard occupied, Bitboard attackers) {
+    int f = file_of(sq) + df;
+    int r = rank_of(sq) + dr;
+    while (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
+        Bitboard bb = square_bb(make_square(File(f), Rank(r)));
+        if (bb & occupied) return (bb & attackers) != 0;
+        f += df;
+        r += dr;
+    }
+    return false;
+}
+
+// Is `sq` attacked by any piece of color `by` in the current occupancy?
+// Symmetric-attack trick for leapers: pieces that attack `sq` sit on the
+// same squares that a same-role piece AT `sq` would attack — with the
+// pawn direction inverted, since pawns only attack "forward."
+bool is_square_attacked(const Position& pos, Square sq, Color by) {
+    if (PAWN_ATTACKS[Color(by ^ 1)][sq] & pos.pieces[by][PAWN])   return true;
+    if (KNIGHT_ATTACKS[sq]              & pos.pieces[by][KNIGHT]) return true;
+    if (KING_ATTACKS[sq]                & pos.pieces[by][KING])   return true;
+
+    const Bitboard occ = pos.occupied;
+    const Bitboard bq  = pos.pieces[by][BISHOP] | pos.pieces[by][QUEEN];
+    const Bitboard rq  = pos.pieces[by][ROOK]   | pos.pieces[by][QUEEN];
+    if (ray_hits_attacker(sq,  1,  1, occ, bq)) return true;
+    if (ray_hits_attacker(sq, -1,  1, occ, bq)) return true;
+    if (ray_hits_attacker(sq,  1, -1, occ, bq)) return true;
+    if (ray_hits_attacker(sq, -1, -1, occ, bq)) return true;
+    if (ray_hits_attacker(sq,  1,  0, occ, rq)) return true;
+    if (ray_hits_attacker(sq, -1,  0, occ, rq)) return true;
+    if (ray_hits_attacker(sq,  0,  1, occ, rq)) return true;
+    if (ray_hits_attacker(sq,  0, -1, occ, rq)) return true;
+    return false;
+}
+
+void generate_castling(const Position& pos, std::vector<Move>& moves) {
+    const Color    us   = pos.side_to_move;
+    const Color    them = Color(us ^ 1);
+    const Bitboard occ  = pos.occupied;
+
+    // Emit one castling move iff: right is present, squares between king
+    // and rook are empty, and king does not start, pass through, or land
+    // on a square attacked by the opponent. B1/B8 emptiness matters for
+    // the rook's transit but NOT for check-safety — the king does not
+    // pass through it.
+    auto try_castle = [&](int right, Square king_from, Square king_to,
+                          Bitboard between_empty, Square transit) {
+        if (!(pos.castling & right))                    return;
+        if (occ & between_empty)                        return;
+        if (is_square_attacked(pos, king_from, them))   return;
+        if (is_square_attacked(pos, transit,   them))   return;
+        if (is_square_attacked(pos, king_to,   them))   return;
+        moves.push_back(make_move(king_from, king_to, MT_CASTLING));
+    };
+
+    if (us == WHITE) {
+        try_castle(WHITE_OO,  E1, G1, square_bb(F1) | square_bb(G1),                    F1);
+        try_castle(WHITE_OOO, E1, C1, square_bb(B1) | square_bb(C1) | square_bb(D1),    D1);
+    } else {
+        try_castle(BLACK_OO,  E8, G8, square_bb(F8) | square_bb(G8),                    F8);
+        try_castle(BLACK_OOO, E8, C8, square_bb(B8) | square_bb(C8) | square_bb(D8),    D8);
+    }
+}
+
 void generate_slider_moves(const Position& pos, std::vector<Move>& moves) {
     const Color    us    = pos.side_to_move;
     const Bitboard our   = pos.colors[us];
@@ -166,6 +234,5 @@ void generate_moves(const Position& pos, std::vector<Move>& moves) {
 
     generate_pawn_moves(pos, moves);
     generate_slider_moves(pos, moves);
-
-    // TODO: castling — see movegen.h milestones.
+    generate_castling(pos, moves);
 }
