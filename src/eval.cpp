@@ -207,32 +207,53 @@ constexpr int BISHOP_PAIR_MG = 30;
 constexpr int BISHOP_PAIR_EG = 50;
 
 // --- Mobility -----------------------------------------------------------
-// Cheap and effective: count squares each piece can move to (own pieces
-// blocked). Different weights per piece type reflect diminishing returns
-// (queens usually have plenty of mobility regardless).
+// Cheap and effective: count squares each piece can move to, minus own
+// pieces AND enemy pawn attack squares ("safe mobility"). Excluding
+// pawn-attacked squares is standard — a knight on a square a pawn can
+// hit is not really mobile there, it'll get traded off. Different
+// weights per piece type reflect diminishing returns (queens usually
+// have plenty of mobility regardless).
 static constexpr int MOB_KNIGHT = 4;
 static constexpr int MOB_BISHOP = 3;
 static constexpr int MOB_ROOK   = 2;
 static constexpr int MOB_QUEEN  = 1;
 
+// Local file masks — same as movegen's file-local constants, duplicated
+// here to keep bitboard.h lean. Only pawn attack computation needs them.
+static constexpr Bitboard EVAL_FILE_A = 0x0101010101010101ULL;
+static constexpr Bitboard EVAL_FILE_H = 0x8080808080808080ULL;
+
+// All squares attacked by `us` pawns (as a shifted bitboard, no per-pawn
+// loop needed). Kept local — only mobility uses it.
+static Bitboard pawn_attacks_of(Color us, Bitboard pawns) {
+    if (us == WHITE) {
+        return ((pawns & ~EVAL_FILE_A) << 7) | ((pawns & ~EVAL_FILE_H) << 9);
+    } else {
+        return ((pawns & ~EVAL_FILE_H) >> 7) | ((pawns & ~EVAL_FILE_A) >> 9);
+    }
+}
+
 static int mobility(const Position& pos, Color us) {
-    const Bitboard occ = pos.occupied;
-    const Bitboard our = pos.colors[us];
+    const Bitboard occ  = pos.occupied;
+    const Bitboard our  = pos.colors[us];
+    const Bitboard their_pawn_atk =
+        pawn_attacks_of(Color(us ^ 1), pos.pieces[Color(us ^ 1)][PAWN]);
+    const Bitboard mask = ~our & ~their_pawn_atk;
     int score = 0;
 
     Bitboard b = pos.pieces[us][KNIGHT];
     while (b) { Square s = pop_lsb(b);
-                score += MOB_KNIGHT * popcount(KNIGHT_ATTACKS[s] & ~our); }
+                score += MOB_KNIGHT * popcount(KNIGHT_ATTACKS[s] & mask); }
     b = pos.pieces[us][BISHOP];
     while (b) { Square s = pop_lsb(b);
-                score += MOB_BISHOP * popcount(bishop_attacks(s, occ) & ~our); }
+                score += MOB_BISHOP * popcount(bishop_attacks(s, occ) & mask); }
     b = pos.pieces[us][ROOK];
     while (b) { Square s = pop_lsb(b);
-                score += MOB_ROOK   * popcount(rook_attacks(s, occ)   & ~our); }
+                score += MOB_ROOK   * popcount(rook_attacks(s, occ)   & mask); }
     b = pos.pieces[us][QUEEN];
     while (b) { Square s = pop_lsb(b);
                 score += MOB_QUEEN  * popcount(
-                    (bishop_attacks(s, occ) | rook_attacks(s, occ)) & ~our); }
+                    (bishop_attacks(s, occ) | rook_attacks(s, occ)) & mask); }
 
     return score;
 }
