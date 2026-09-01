@@ -107,6 +107,43 @@ TEST_CASE("make_move produces expected FEN for every move type") {
 // Complements the forward-correctness table: verifies unmake also handles
 // every special move type. Same cases, plus assertion that make actually
 // changed the FEN (guards against no-op make_move surviving as a mutant).
+TEST_CASE("is_repetition: fresh position has no repetition") {
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    CHECK_FALSE(pos.is_repetition());
+}
+
+TEST_CASE("is_repetition: shuttling a knight back and forth triggers repetition") {
+    // Nf3 Nf6 Ng1 Ng8 → returns to the position AFTER 1.Nf3 Nf6? No — actually
+    // returns to startpos-ish (same piece positions and side to move).
+    // Play 1.Nf3 Nf6 2.Ng1 Ng8 → back to startpos AS BLACK to move... no,
+    // white made two moves, black made two — side to move is white, same as
+    // startpos. And piece positions all restored. Should detect repetition.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    UndoInfo u1, u2, u3, u4;
+    pos.make_move(::make_move(G1, F3), u1);   // white Nf3
+    pos.make_move(::make_move(G8, F6), u2);   // black Nf6
+    pos.make_move(::make_move(F3, G1), u3);   // white Ng1 (back)
+    pos.make_move(::make_move(F6, G8), u4);   // black Ng8 (back)
+    // Back at startpos — repetition of the starting position.
+    CHECK(pos.is_repetition());
+}
+
+TEST_CASE("is_repetition: distinct positions never trigger a false positive") {
+    // Sequence never returns to a prior position — no square shared with any
+    // earlier board. Belt-and-suspenders check that we don't misidentify a
+    // hash collision or off-by-one scan.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    UndoInfo u1, u2, u3, u4;
+    pos.make_move(::make_move(E2, E4), u1);
+    pos.make_move(::make_move(E7, E5), u2);
+    pos.make_move(::make_move(G1, F3), u3);
+    pos.make_move(::make_move(B8, C6), u4);
+    CHECK_FALSE(pos.is_repetition());
+}
+
 TEST_CASE("unmake_move restores FEN for every special move type") {
     struct RoundTripCase { const char* name; const char* fen; Move m; };
     const RoundTripCase cases[] = {

@@ -234,6 +234,13 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     ++ctx.nodes;
     if (ctx.stopped || should_stop(ctx)) { ctx.stopped = true; return 0; }
 
+    // Draw detection — never at the root itself (ply > 0) so search_root's
+    // fallback still returns a legal move. Both draws score 0: repetition
+    // opponent will claim, 50-move rule is enforceable by law of the game.
+    if (ply > 0 && (pos.is_repetition() || pos.halfmove_clock >= 100)) {
+        return 0;
+    }
+
     // Check extension: when the side to move is in check, tactical lines
     // are often deeper than the requested depth. Extend by one ply so
     // mate combinations don't fall off the horizon. Computed once here

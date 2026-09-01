@@ -40,6 +40,7 @@ void Position::clear() {
     key             = 0;
     psq_mg[WHITE] = psq_mg[BLACK] = 0;
     psq_eg[WHITE] = psq_eg[BLACK] = 0;
+    history_size    = 0;
 }
 
 bool Position::set_from_fen(const std::string& fen) {
@@ -101,6 +102,11 @@ bool Position::set_from_fen(const std::string& fen) {
             }
         }
     }
+
+    // Seed the repetition-detection history with the initial position.
+    // make_move / unmake_move maintain it as a push/pop stack from here.
+    history[0]   = key;
+    history_size = 1;
     return true;
 }
 
@@ -260,6 +266,13 @@ void Position::make_move(Move m, UndoInfo& u) {
     if (ep_square != NO_SQUARE) key ^= zobrist::EP_FILE[file_of(ep_square)];
     key ^= zobrist::SIDE;
 
+    // Push the post-move key so repetition detection sees this state.
+    // Bounded — history[256] handles more plies than any legal chess
+    // game; overflow would be a search-depth bug, not a real position.
+    if (history_size < int(sizeof(history) / sizeof(history[0]))) {
+        history[history_size++] = key;
+    }
+
     // Real games have exactly one king per side, but the standard perft
     // suite includes contrived positions with none — assert only the upper
     // bound to catch actual corruption (double-king) without rejecting them.
@@ -316,6 +329,22 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
     // and it's what tests check against (compute(pos) after unmake must
     // equal the pre-move key).
     key            = u.key;
+    // Pop the repetition-history entry pushed by the matching make_move.
+    if (history_size > 0) --history_size;
+}
+
+bool Position::is_repetition() const {
+    // Scan back for a matching key. Steps by 2 (only same-side-to-move
+    // positions can share a Zobrist key) and stops at the halfmove_clock
+    // boundary — pawn moves and captures are irreversible, so any
+    // position before the last such move can't be reached again.
+    int stop = history_size - 1 - halfmove_clock;
+    if (stop < 0) stop = 0;
+    // history[history_size - 1] is the CURRENT position — skip it.
+    for (int i = history_size - 3; i >= stop; i -= 2) {
+        if (history[i] == key) return true;
+    }
+    return false;
 }
 
 std::string Position::pretty() const {

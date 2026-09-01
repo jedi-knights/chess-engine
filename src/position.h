@@ -42,10 +42,23 @@ struct Position {
     int      psq_mg[NUM_COLORS] = {0, 0};
     int      psq_eg[NUM_COLORS] = {0, 0};
 
+    // Zobrist-key history for repetition detection. set_from_fen seeds
+    // index 0 with the starting key; make_move pushes the post-move key
+    // and unmake_move pops. Sized for 256 halfmoves — well above any
+    // legal game length (50-move rule + max game length).
+    uint64_t history[256]   = {};
+    int      history_size   = 0;
+
     void        clear();
     bool        set_from_fen(const std::string& fen);
     std::string to_fen() const;
     std::string pretty() const;
+
+    // True if the current position (identified by `key`) has appeared
+    // earlier in `history` — a repetition draw candidate. Only scans
+    // back as far as the halfmove_clock (irreversible moves before
+    // that reset the pool of reachable positions).
+    bool        is_repetition() const;
 
     // Apply / revert `m`. `u` must be the same UndoInfo instance for both
     // calls. Supports normal, capture, en-passant, castling, and promotion
