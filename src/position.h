@@ -44,10 +44,15 @@ struct Position {
 
     // Zobrist-key history for repetition detection. set_from_fen seeds
     // index 0 with the starting key; make_move pushes the post-move key
-    // and unmake_move pops. Sized for 256 halfmoves — well above any
-    // legal game length (50-move rule + max game length).
-    uint64_t history[256]   = {};
-    int      history_size   = 0;
+    // and unmake_move pops. Sized for 1024 halfmoves — comfortably above
+    // any legal game (50-move rule caps under 6000 plies but analysis
+    // sessions can push further). Overflow asserts in debug, silently
+    // caps in release — either way the fault is loud on the ASan tests
+    // and quiet in production rather than silently corrupting repetition
+    // detection.
+    static constexpr int HISTORY_CAPACITY = 1024;
+    uint64_t history[HISTORY_CAPACITY] = {};
+    int      history_size              = 0;
 
     void        clear();
     bool        set_from_fen(const std::string& fen);

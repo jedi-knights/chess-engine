@@ -270,9 +270,11 @@ void Position::make_move(Move m, UndoInfo& u) {
     key ^= zobrist::SIDE;
 
     // Push the post-move key so repetition detection sees this state.
-    // Bounded — history[256] handles more plies than any legal chess
-    // game; overflow would be a search-depth bug, not a real position.
-    if (history_size < int(sizeof(history) / sizeof(history[0]))) {
+    // Bounded by HISTORY_CAPACITY; overflow would be a search-depth bug
+    // (real games can't approach it), so assert loud in debug and cap
+    // silently in release rather than corrupting the stack.
+    assert(history_size < HISTORY_CAPACITY);
+    if (history_size < HISTORY_CAPACITY) {
         history[history_size++] = key;
     }
 
