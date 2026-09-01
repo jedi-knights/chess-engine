@@ -12,7 +12,23 @@ OBJS     := $(SRCS:.cpp=.o)
 TEST_SRCS := $(wildcard $(TESTDIR)/*.cpp) $(filter-out $(SRCDIR)/main.cpp,$(SRCS))
 TEST_BIN  := $(TESTDIR)/run
 
-.PHONY: all clean debug perft run test
+# Use the LLVM tools that match the compiler that built the coverage
+# binary — on macOS, `xcrun` finds the ones Apple's clang++ ships with
+# (Homebrew's llvm-cov can mismatch the profile format across LLVM
+# major versions). On Linux, plain names work.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  LLVM_COV      := xcrun llvm-cov
+  LLVM_PROFDATA := xcrun llvm-profdata
+else
+  LLVM_COV      := llvm-cov
+  LLVM_PROFDATA := llvm-profdata
+endif
+
+COVDIR   := coverage
+COV_BIN  := $(COVDIR)/tests
+
+.PHONY: all clean debug perft run test lint coverage
 
 all: $(TARGET)
 
@@ -43,5 +59,37 @@ $(TEST_BIN): $(TEST_SRCS)
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
+# Static analysis. Runs the useful check families without magic-numbers
+# noise (a chess engine is nothing BUT magic numbers). Doesn't touch
+# third_party/. Reports issues but doesn't fail the build — treat as
+# advisory, wire into CI with `--warnings-as-errors=*` once we're clean.
+lint:
+	clang-tidy \
+	    --checks='bugprone-*,performance-*,readability-*,-readability-magic-numbers,-readability-identifier-length' \
+	    $(SRCS) -- -std=c++20 -I$(SRCDIR) -Ithird_party
+
+# Coverage: rebuild the test binary with clang's source-based coverage
+# instrumentation, run it, merge the raw profile, export as LCOV, render
+# to HTML via genhtml (from the `lcov` package — install with
+# `brew install lcov` on macOS, `apt install lcov` on Debian/Ubuntu).
+#
+# HTML index lands at coverage/html/index.html.
+coverage:
+	mkdir -p $(COVDIR)
+	$(CXX) -std=c++20 -O0 -g -Wall -Wextra -Wpedantic \
+	    -fprofile-instr-generate -fcoverage-mapping \
+	    -I$(SRCDIR) -Ithird_party \
+	    -o $(COV_BIN) $(TEST_SRCS)
+	LLVM_PROFILE_FILE="$(COVDIR)/tests.profraw" ./$(COV_BIN) > /dev/null
+	$(LLVM_PROFDATA) merge -sparse $(COVDIR)/tests.profraw -o $(COVDIR)/tests.profdata
+	$(LLVM_COV) export -format=lcov \
+	    -instr-profile=$(COVDIR)/tests.profdata \
+	    $(COV_BIN) $(SRCS) > $(COVDIR)/lcov.info
+	genhtml $(COVDIR)/lcov.info -o $(COVDIR)/html \
+	    --quiet --ignore-errors source,unsupported \
+	    --title "chess-engine coverage"
+	@echo ""
+	@echo "Coverage HTML: $(COVDIR)/html/index.html"
+
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_BIN)
+	rm -rf $(OBJS) $(TARGET) $(TEST_BIN) $(COVDIR)

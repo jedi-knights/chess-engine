@@ -1,8 +1,11 @@
 engine
 tests/run
+coverage/
 *.o
 *.d
 *.dSYM/
+*.profraw
+*.profdata
 .cache/
 compile_commands.json
 TODO.md
