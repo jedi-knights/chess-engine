@@ -202,6 +202,24 @@ TEST_CASE("quiescence stabilizes score across depths on a quiet position") {
     CHECK((hi - lo) <= 100);
 }
 
+TEST_CASE("qsearch sees non-capture promotions at leaves") {
+    // At d=2, white pushes B6->B7 at root, black responds, then white
+    // reaches ply 2 depth 0 -- qsearch. The B7 pawn's non-capture
+    // promotion is available there; qsearch must include it. Before
+    // SEE handled promotions, non-capture promos were scored below the
+    // capture band and pruned by the SEE-prune, so qsearch returned
+    // stand_pat (~+100 for the 7th-rank pawn) instead of ~+800 for the
+    // pending queening.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/1P6/8/8/8/8/6K1 w - - 0 1"));
+    clear_transposition_table();
+    SearchResult r = search_best(pos, 2);
+    CHECK(r.best_move == ::make_move(B6, B7));
+    // With the promo included, the score should be well above the raw
+    // stand_pat of a 7th-rank pawn.
+    CHECK(r.score > 400);
+}
+
 TEST_CASE("quiescence still detects mate at qsearch leaves") {
     // Same back-rank mate as the negamax test. Terminal detection has to
     // work at qsearch's terminal too, otherwise a mated leaf would
