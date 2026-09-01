@@ -1,7 +1,7 @@
 #include "perft.h"
 #include "movegen.h"
-#include <cstdio>
-#include <vector>
+
+#include <ostream>
 
 uint64_t perft(Position& pos, int depth) {
     if (depth == 0) return 1;
@@ -45,25 +45,24 @@ static const PerftEntry SUITE[] = {
      {1, 46, 2079, 89890, 3894594, 164075551, 0}},
 };
 
-bool run_perft_suite(int max_depth) {
+bool run_perft_suite(int max_depth, std::ostream& out) {
     bool all_ok = true;
     for (const auto& e : SUITE) {
         Position pos;
         if (!pos.set_from_fen(e.fen)) {
-            std::printf("[FAIL] %s: bad FEN\n", e.name);
+            out << "[FAIL] " << e.name << ": bad FEN\n";
             all_ok = false;
             continue;
         }
-        std::printf("=== %s ===\n%s\n", e.name, e.fen);
+        out << "=== " << e.name << " ===\n" << e.fen << '\n';
         for (int d = 1; d <= max_depth && d < 7; ++d) {
             uint64_t expected = e.counts[d];
             if (expected == 0) continue;
             uint64_t got  = perft(pos, d);
             const char* mark = (got == expected) ? "OK  " : "FAIL";
-            std::printf("  [%s] depth %d: got %llu, expected %llu\n",
-                        mark, d,
-                        (unsigned long long)got,
-                        (unsigned long long)expected);
+            out << "  [" << mark << "] depth " << d
+                << ": got " << got
+                << ", expected " << expected << '\n';
             if (got != expected) all_ok = false;
         }
     }

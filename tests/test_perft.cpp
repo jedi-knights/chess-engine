@@ -9,6 +9,7 @@
 #include "position.h"
 
 #include <cstdint>
+#include <sstream>
 #include <string>
 
 // After milestone 4, startpos is fully covered by knight+king+pawn moves:
@@ -62,4 +63,71 @@ TEST_CASE("perft matches on all standard positions through depth 3") {
             CHECK(perft(pos, d) == c.counts[d]);
         }
     }
+}
+
+// --- perft() edge cases -------------------------------------------------
+
+TEST_CASE("perft depth 0 always returns 1") {
+    // Base case: no moves to enumerate, exactly one node (the starting
+    // position itself). This is what makes the recurrence sum correctly.
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    CHECK(perft(pos, 0) == 1);
+}
+
+TEST_CASE("perft returns 0 on a mated position") {
+    // Back-rank mate — same fixture the legality tests use. No legal
+    // moves at depth 1 means the sum over children is empty.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/6PP/5r1K w - - 0 1"));
+    CHECK(perft(pos, 1) == 0);
+    CHECK(perft(pos, 2) == 0);  // still 0 deeper — no children to enumerate
+}
+
+TEST_CASE("perft returns 0 on a stalemate position") {
+    // Classic king+pawn stalemate.
+    Position pos;
+    REQUIRE(pos.set_from_fen("8/8/8/8/8/4k3/4p3/4K3 w - - 0 1"));
+    CHECK(perft(pos, 1) == 0);
+}
+
+// --- run_perft_suite() driver -------------------------------------------
+
+TEST_CASE("run_perft_suite: depth 1 all positions pass and print expected shape") {
+    // Drive the suite via an ostringstream so the printf-style output
+    // stays out of test noise. Verifies both the return value AND the
+    // rendered report format that a user staring at `./engine perft N`
+    // relies on.
+    std::ostringstream out;
+    bool ok = run_perft_suite(1, out);
+    CHECK(ok);
+
+    const std::string s = out.str();
+    // Every one of the 6 standard-suite entries should appear in a
+    // header line. The suite renders "=== <name> ===" per position, so
+    // "===" appears 2 times per position = 12 total.
+    int trip_count = 0;
+    size_t pos = 0;
+    while ((pos = s.find("===", pos)) != std::string::npos) { ++trip_count; ++pos; }
+    CHECK(trip_count == 12);
+
+    // Depth-1 counts all pass with our current legality-correct movegen,
+    // so no [FAIL] lines and at least one [OK  ] line.
+    CHECK(s.find("[FAIL]") == std::string::npos);
+    CHECK(s.find("[OK  ]") != std::string::npos);
+
+    // Spot-check that specific standard-suite names made it into the output.
+    CHECK(s.find("Startpos")   != std::string::npos);
+    CHECK(s.find("Kiwipete")   != std::string::npos);
+    CHECK(s.find("Position 6") != std::string::npos);
+}
+
+TEST_CASE("run_perft_suite: max_depth=0 emits headers but no depth lines") {
+    // Boundary — the depth loop's condition (`d <= max_depth`) never
+    // enters the body when max_depth is 0, but headers still print
+    // per-position. Confirms we don't crash on the trivial input.
+    std::ostringstream out;
+    CHECK(run_perft_suite(0, out) == true);
+    CHECK(out.str().find("Startpos") != std::string::npos);
+    CHECK(out.str().find("depth")    == std::string::npos);
 }
