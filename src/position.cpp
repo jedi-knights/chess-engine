@@ -208,8 +208,10 @@ void Position::make_move(Move m, UndoInfo& u) {
     // Roll the pre-move castling/ep/side keys OUT now. The corresponding
     // post-move keys are XOR'd back in at the end after those fields are
     // updated. Piece-square keys are handled inside put_piece/remove_piece.
+    // EP is hashed only when the ep capture is pseudo-legal — same rule
+    // as zobrist::compute, so incremental key stays in sync.
     key ^= zobrist::CASTLING[castling & 15];
-    if (ep_square != NO_SQUARE) key ^= zobrist::EP_FILE[file_of(ep_square)];
+    if (zobrist::ep_is_capturable(*this)) key ^= zobrist::EP_FILE[file_of(ep_square)];
 
     // Remove captured piece first (en passant captures off-square).
     if (u.captured != NO_PIECE) {
@@ -261,9 +263,10 @@ void Position::make_move(Move m, UndoInfo& u) {
     side_to_move = them;
 
     // Roll the new castling / ep / side keys IN. SIDE toggles on every
-    // move (XOR is self-inverse) regardless of which color moved.
+    // move (XOR is self-inverse) regardless of which color moved. EP
+    // hash matches compute()'s rule (pseudo-legal only).
     key ^= zobrist::CASTLING[castling & 15];
-    if (ep_square != NO_SQUARE) key ^= zobrist::EP_FILE[file_of(ep_square)];
+    if (zobrist::ep_is_capturable(*this)) key ^= zobrist::EP_FILE[file_of(ep_square)];
     key ^= zobrist::SIDE;
 
     // Push the post-move key so repetition detection sees this state.

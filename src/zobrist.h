@@ -26,7 +26,15 @@ uint64_t compute(const Position& pos);
 // position's `key` field so it stays in sync with what compute() would produce.
 extern uint64_t PIECE_SQ  [NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES];
 extern uint64_t CASTLING  [16];    // indexed by castling rights bitmask
-extern uint64_t EP_FILE   [8];     // XOR only when ep_square != NO_SQUARE
+extern uint64_t EP_FILE   [8];     // XOR only when ep_is_capturable(pos)
 extern uint64_t SIDE;              // XOR when it becomes black's turn
+
+// True iff an en-passant capture is pseudo-legally available in `pos`:
+// side_to_move has a pawn on one of the two squares diagonally adjacent
+// to ep_square. Guards the EP_FILE XOR — positions with a "phantom" ep
+// flag (double-push landing next to no enemy pawn) must not hash it, or
+// they'd collide differently than an otherwise-identical position where
+// the ep flag was never set.
+bool ep_is_capturable(const Position& pos);
 
 }  // namespace zobrist
