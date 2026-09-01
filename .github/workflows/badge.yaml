@@ -1,0 +1,84 @@
+name: Badge
+
+# Triggered after the CI workflow completes on main. Running in a
+# separate workflow (not a job in ci.yml) avoids a push race — if
+# this job committed to main on the same push trigger as ci.yml, the
+# badge-commit push could be rejected with "fetch first".
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  badge:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install toolchain + coverage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm lcov python3-pip
+          # PEP 668 on Ubuntu 24.04 forbids pip in the system Python
+          # by default; --break-system-packages is fine in CI (throwaway env).
+          pip3 install --break-system-packages lcov_cobertura
+        shell: bash
+
+      # Two-format setup: `make coverage` produces the LCOV that genhtml
+      # renders (the same yoda.nvim-style HTML report). lcov_cobertura
+      # converts the same LCOV into Cobertura XML for the coverage-badge
+      # action below. Both formats come from a single instrumented run
+      # so the numbers are guaranteed to match.
+      - name: Generate coverage reports
+        run: |
+          make coverage
+          lcov_cobertura coverage/lcov.info -o coverage.xml
+        shell: bash
+
+      - name: Update Coverage Badge
+        uses: jedi-knights/coverage-badge@v0
+        with:
+          coverage-file: coverage.xml
+          badge-label: Coverage
+          report-url: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/?v=${{ github.run_number }}
+
+      - name: Commit badge
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # [skip ci] on the commit so the badge push doesn't retrigger CI
+          # (which would then retrigger this badge workflow — infinite loop).
+          git diff --quiet README.md \
+            || (git add README.md \
+                && git commit -m "chore: update coverage badge [skip ci]" \
+                && git push)
+        shell: bash
+
+      - name: Upload Pages Artifact
+        if: always()
+        id: upload-artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: coverage/html/
+
+      - name: Deploy to GitHub Pages
+        if: always() && steps.upload-artifact.outcome == 'success'
+        id: deploy
+        uses: actions/deploy-pages@v4
