@@ -255,15 +255,41 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     score_moves(pos, moves, scores, tt_move, ctx, ply);
 
     const int original_alpha = alpha;
+    const bool node_in_check = in_check(pos);
     int  best      = -INF;
     Move best_move = NULL_MOVE;
     for (int i = 0; i < moves.size(); ++i) {
         pick_move_to_front(moves, scores, i);
         Move m = moves[i];
 
+        // LMR (Late Move Reductions): after the first few well-ordered
+        // moves at deep-enough depths, quiet non-promotion moves are
+        // very unlikely to beat alpha. Search them at REDUCED depth
+        // first; only if that "verification" search returns a score
+        // that improves alpha do we pay the full-depth cost. Cutoffs
+        // stay correct because if the reduced score exceeds alpha, we
+        // re-search — we never accept a reduced score.
+        const bool is_cap = is_capture(pos, m);
+        const bool is_promo = move_type(m) == MT_PROMOTION;
+        const bool can_reduce = depth >= 3 && i >= 4
+                              && !is_cap && !is_promo && !node_in_check;
+
         UndoInfo u;
         pos.make_move(m, u);
-        int score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
+
+        int score;
+        if (can_reduce) {
+            int reduction = (i >= 12) ? 2 : 1;
+            score = -negamax(pos, depth - 1 - reduction, -beta, -alpha, ply + 1, ctx);
+            if (score > alpha) {
+                // Reduced search suggested this move improves alpha —
+                // pay the cost of verifying at full depth.
+                score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
+            }
+        } else {
+            score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
+        }
+
         pos.unmake_move(m, u);
         if (ctx.stopped) return 0;                // bubble up cancellation
         if (score > best)  { best = score; best_move = m; }
