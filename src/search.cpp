@@ -581,6 +581,48 @@ bool search_root(Position& pos, int depth,
     return true;
 }
 
+// Walk the TT starting from `best_move` at `pos` to reconstruct the
+// principal variation. Bounded by `max_len` and by defensive checks:
+// TT miss, TT-move illegal in the current position, or a cycle in the
+// walk all cause an early return.
+void build_pv(Position pos, Move best_move, int max_len,
+              std::vector<Move>& out) {
+    out.clear();
+    if (best_move == NULL_MOVE) return;
+
+    // Fresh MoveList each generate_moves call — the generator appends, so
+    // reusing across iterations would accumulate entries from prior plies.
+    auto legal_in = [](Position& p, Move want) {
+        MoveList legal;
+        generate_moves(p, legal);
+        return std::find(legal.begin(), legal.end(), want) != legal.end();
+    };
+
+    if (!legal_in(pos, best_move)) return;
+
+    out.push_back(best_move);
+    UndoInfo u;
+    pos.make_move(best_move, u);
+
+    std::vector<uint64_t> seen{pos.key};
+    for (int i = 1; i < max_len; ++i) {
+        int  dummy_score;
+        Move next;
+        if (!tt().probe(pos.key, /*depth=*/0, -INF, INF, dummy_score, next))
+            break;
+        if (next == NULL_MOVE) break;
+        if (!legal_in(pos, next)) break;
+
+        out.push_back(next);
+        UndoInfo u2;
+        pos.make_move(next, u2);
+        // Cycle guard: TT collisions or transpositions can point us back
+        // to a position already in the walk. Stop rather than loop.
+        if (std::find(seen.begin(), seen.end(), pos.key) != seen.end()) break;
+        seen.push_back(pos.key);
+    }
+}
+
 }  // namespace
 
 SearchResult search_best(Position& pos, int depth) {
@@ -589,6 +631,7 @@ SearchResult search_best(Position& pos, int depth) {
     SearchResult r;
     search_root(pos, depth, -INF, INF, ctx, r);
     r.nodes = ctx.nodes;
+    build_pv(pos, r.best_move, depth, r.pv);
     return r;
 }
 
@@ -648,6 +691,10 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
         // from a losing subtree we hadn't refuted yet).
         if (!completed && d > 1) break;
         r.nodes = ctx.nodes;
+        // Reconstruct PV before firing the callback so UCI can print
+        // the full line. Bounded by iteration depth so we don't chase
+        // TT transpositions past what we actually searched.
+        build_pv(pos, r.best_move, d, r.pv);
         best = r;
         if (on_iter) on_iter(best);
         if (ctx.stopped) break;

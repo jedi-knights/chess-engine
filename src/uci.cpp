@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -55,12 +56,18 @@ void cmd_isready(std::ostream& out) {
     emit(out, "readyok\n");
 }
 
-void cmd_position(std::istringstream& is, Position& pos) {
+void cmd_position(std::istringstream& is, Position& pos, std::ostream& out) {
     // A `position` command mid-search would race with the running search's
     // read of `pos` (the search thread copies pos, so it's safe on the
     // search's side, but the semantics of "search this old position, then
     // report on the new position" are useless to any real GUI). Cancel
-    // and drop any pending bestmove.
+    // and drop any pending bestmove — but surface it, since sending
+    // `position` during `go infinite` without a `stop` first is a GUI bug
+    // that would otherwise fail silently.
+    if (g_search_thread.joinable()) {
+        emit(out, "info string position received during active search; "
+                  "canceling and applying new position\n");
+    }
     wait_for_search();
 
     std::string token;
@@ -163,16 +170,36 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
     Position pos_copy = pos;
     std::ostream* out_ptr = &out;
 
+    auto search_start = std::chrono::steady_clock::now();
     g_search_thread = std::thread(
-        [pos_copy = std::move(pos_copy), limits, out_ptr]() mutable {
+        [pos_copy = std::move(pos_copy), limits, out_ptr, search_start]() mutable {
             SearchResult r = search_iterative(pos_copy, limits,
                 [&](const SearchResult& iter) {
+                    auto now = std::chrono::steady_clock::now();
+                    int elapsed_ms = static_cast<int>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - search_start).count());
+                    // NPS: guard against divide-by-zero on sub-ms iterations.
+                    uint64_t nps = elapsed_ms > 0
+                        ? (iter.nodes * 1000ULL) / static_cast<uint64_t>(elapsed_ms)
+                        : iter.nodes * 1000ULL;
+
                     std::ostringstream line;
                     line << "info depth " << iter.depth
                          << " score cp "  << iter.score
                          << " nodes "     << iter.nodes
-                         << " pv "        << move_to_uci(iter.best_move)
-                         << "\n";
+                         << " nps "       << nps
+                         << " time "      << elapsed_ms
+                         << " pv";
+                    // Full PV walked from the TT. Fall back to just the
+                    // bestmove if the walk came up empty (shouldn't
+                    // happen post-iteration but the check is cheap).
+                    if (iter.pv.empty()) {
+                        line << ' ' << move_to_uci(iter.best_move);
+                    } else {
+                        for (Move m : iter.pv) line << ' ' << move_to_uci(m);
+                    }
+                    line << "\n";
                     emit(*out_ptr, line.str());
                 });
             emit(*out_ptr, "bestmove " + move_to_uci(r.best_move) + "\n");
@@ -211,7 +238,7 @@ void uci_loop(std::istream& in, std::ostream& out) {
         else if (cmd == "ucinewgame") { wait_for_search();
                                         pos.set_from_fen(STARTPOS_FEN);
                                         clear_transposition_table(); }
-        else if (cmd == "position")   cmd_position(is, pos);
+        else if (cmd == "position")   cmd_position(is, pos, out);
         else if (cmd == "go")         cmd_go(is, pos, out);
         else if (cmd == "stop")       cmd_stop();
         else if (cmd == "d")          { wait_for_search();
