@@ -295,12 +295,15 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     return best;
 }
 
-// Single-depth root search. Populates `out` if the depth completes; leaves
-// it untouched if the search stopped mid-iteration so the caller can fall
-// back to the previous iteration's result.
-bool search_root(Position& pos, int depth, SearchContext& ctx,
-                 SearchResult& out) {
-    ++ctx.nodes;   // count the root
+// Single-depth root search bounded by (alpha_init, beta_root). Populates
+// `out` if the depth completes; leaves it untouched if the search stopped
+// mid-iteration. The window parameters enable aspiration search — when
+// the returned score lands outside the window, the caller re-searches
+// with a wider one.
+bool search_root(Position& pos, int depth,
+                 int alpha_init, int beta_root,
+                 SearchContext& ctx, SearchResult& out) {
+    ++ctx.nodes;
 
     MoveList moves;
     generate_moves(pos, moves);
@@ -315,8 +318,6 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
     // Root uses the TT-move hint from any prior iteration or earlier
     // `go` call — iterative deepening's biggest ordering win comes from
     // trying last iteration's best move first at the next depth.
-    // Killers/history at ply 0 are populated by prior root iterations of
-    // this same search_iterative call.
     int  tt_score = 0;
     Move tt_move  = NULL_MOVE;
     tt().probe(pos.key, /*depth=*/0, -INF, INF, tt_score, tt_move);
@@ -324,7 +325,7 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
     int scores[MoveList::MAX_MOVES];
     score_moves(pos, moves, scores, tt_move, ctx, /*ply=*/0);
 
-    int  alpha     = -INF;
+    int  alpha     = alpha_init;
     int  best      = -INF;
     Move best_move = NULL_MOVE;
     for (int i = 0; i < moves.size(); ++i) {
@@ -332,25 +333,26 @@ bool search_root(Position& pos, int depth, SearchContext& ctx,
         Move m = moves[i];
         UndoInfo u;
         pos.make_move(m, u);
-        int score = -negamax(pos, depth - 1, -INF, -alpha, 1, ctx);
+        int score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, ctx);
         pos.unmake_move(m, u);
-        if (ctx.stopped) {
-            // Cancelled mid-iteration. Preserve whatever `best_move` we
-            // found so far — the caller can salvage it as a partial
-            // result. If we hadn't finished any move yet, best_move
-            // stays NULL_MOVE and the fallback in search_iterative
-            // picks the first legal move.
-            return false;
-        }
+        if (ctx.stopped) return false;
         if (score > best)  { best = score; best_move = m; }
         if (score > alpha) alpha = score;
+        // Fail-high at root: with aspiration windows beta_root is finite
+        // and a move that beats it means our score estimate was too low —
+        // the caller widens and re-searches, so no point iterating the
+        // remaining moves (they can't lower the fail-high score).
+        if (alpha >= beta_root) break;
     }
     out.best_move = best_move;
     out.score     = best;
     out.depth     = depth;
-    // Store the root result so the next ID iteration (and future `go`
-    // calls on the same position) benefit from move ordering.
-    tt().store(pos.key, depth, score_to_tt(best, 0), best_move, TT_EXACT);
+    // Only store as EXACT when the score landed inside the window; the
+    // wrapper handles fail-high/low re-searches and stores the exact
+    // result once it converges.
+    if (best > alpha_init && best < beta_root) {
+        tt().store(pos.key, depth, score_to_tt(best, 0), best_move, TT_EXACT);
+    }
     return true;
 }
 
@@ -360,7 +362,7 @@ SearchResult search_best(Position& pos, int depth) {
     SearchContext ctx;
     ctx.start = Clock::now();
     SearchResult r;
-    search_root(pos, depth, ctx, r);
+    search_root(pos, depth, -INF, INF, ctx, r);
     r.nodes = ctx.nodes;
     return r;
 }
@@ -377,9 +379,45 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
 
     SearchResult best;
 
+    // Aspiration search: from d=2 onward we guess the score will be close
+    // to last iteration's, so search inside a narrow window (±25 cp) and
+    // fall back to a wider one only if we fail-high or fail-low. Cheap
+    // when the guess is right (most iterations), self-correcting when
+    // wrong. Delta doubles per re-search up to a threshold, then opens
+    // the window fully.
+    // Initial window sized above the typical depth-parity score oscillation
+    // (~40 cp on startpos-style positions). Too narrow and we re-search
+    // every iteration; too wide and we lose the pruning benefit. 75 is
+    // conservative for our current eval; larger MAX bounds re-search work
+    // when the score genuinely moves (tactical positions).
+    constexpr int ASPIRATION_INITIAL = 75;
+    constexpr int ASPIRATION_MAX     = 2000;
+
     for (int d = 1; d <= limits.max_depth; ++d) {
         SearchResult r;
-        bool completed = search_root(pos, d, ctx, r);
+        bool completed;
+
+        if (d == 1) {
+            completed = search_root(pos, d, -INF, INF, ctx, r);
+        } else {
+            int delta = ASPIRATION_INITIAL;
+            int alpha = best.score - delta;
+            int beta  = best.score + delta;
+            while (true) {
+                completed = search_root(pos, d, alpha, beta, ctx, r);
+                if (!completed) break;
+                if (r.score <= alpha) {           // fail-low: widen alpha
+                    delta *= 2;
+                    alpha = (delta >= ASPIRATION_MAX) ? -INF : best.score - delta;
+                } else if (r.score >= beta) {     // fail-high: widen beta
+                    delta *= 2;
+                    beta = (delta >= ASPIRATION_MAX) ? INF : best.score + delta;
+                } else {
+                    break;                        // score inside window — done
+                }
+            }
+        }
+
         // For d > 1, only accept fully-completed iterations — a
         // partial deeper result is unreliable (best-move might come
         // from a losing subtree we hadn't refuted yet).
