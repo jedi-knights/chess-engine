@@ -196,6 +196,16 @@ static void passed_pawn_bonus(const Position& pos, Color us,
     eg_out += eg;
 }
 
+// --- Bishop pair --------------------------------------------------------
+// Two bishops are worth more than the sum of the parts — they cover both
+// color complexes together, so tactical possibilities compound. Standard
+// engine bonus is ~30 cp MG, ~50 cp EG (endgame value is higher because
+// open positions give bishops more scope). Guards on "at least two"
+// rather than "exactly two" so promotions to bishop still count, though
+// two same-color bishops after underpromotion is a rare degenerate case.
+constexpr int BISHOP_PAIR_MG = 30;
+constexpr int BISHOP_PAIR_EG = 50;
+
 // --- Mobility -----------------------------------------------------------
 // Cheap and effective: count squares each piece can move to (own pieces
 // blocked). Different weights per piece type reflect diminishing returns
@@ -246,6 +256,16 @@ int evaluate(const Position& pos) {
     passed_pawn_bonus(pos, BLACK, passed_b_mg, passed_b_eg);
     mg_diff += passed_w_mg - passed_b_mg;
     eg_diff += passed_w_eg - passed_b_eg;
+
+    // Bishop pair — flat bonus per side with two or more bishops.
+    if (popcount(pos.pieces[WHITE][BISHOP]) >= 2) {
+        mg_diff += BISHOP_PAIR_MG;
+        eg_diff += BISHOP_PAIR_EG;
+    }
+    if (popcount(pos.pieces[BLACK][BISHOP]) >= 2) {
+        mg_diff -= BISHOP_PAIR_MG;
+        eg_diff -= BISHOP_PAIR_EG;
+    }
 
     int phase = compute_phase(pos);
     int score = (mg_diff * phase + eg_diff * (PHASE_MAX - phase)) / PHASE_MAX;
