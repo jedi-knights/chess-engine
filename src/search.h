@@ -5,12 +5,18 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 struct SearchResult {
     Move     best_move = NULL_MOVE;   // NULL_MOVE only if no legal moves exist
     int      score     = 0;           // centipawns from side_to_move perspective
     int      depth     = 0;           // deepest fully-completed depth
     uint64_t nodes     = 0;           // cumulative nodes visited
+    // Principal variation extracted by walking the TT after each iteration.
+    // pv[0] == best_move; length is bounded by iteration depth. UCI wants
+    // this in the `info ... pv ...` line so GUIs can display the engine's
+    // predicted line of play.
+    std::vector<Move> pv;
 };
 
 struct SearchLimits {
