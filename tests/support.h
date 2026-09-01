@@ -19,11 +19,11 @@ inline const std::vector<std::string> STANDARD_FENS = {
     "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
 };
 
-inline bool contains_move(const std::vector<Move>& moves, Move needle) {
+inline bool contains_move(const MoveList& moves, Move needle) {
     return std::find(moves.begin(), moves.end(), needle) != moves.end();
 }
 
-inline int count_moves_from(const std::vector<Move>& moves, Square from) {
+inline int count_moves_from(const MoveList& moves, Square from) {
     int n = 0;
     for (Move m : moves) if (move_from(m) == from) ++n;
     return n;
