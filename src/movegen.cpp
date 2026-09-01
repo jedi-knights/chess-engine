@@ -102,6 +102,30 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
     }
 }
 
+// All squares attacked by color `by` given occupancy `occ`. One-shot
+// alternative to per-square is_square_attacked for callers that need a
+// full "attack map" (king-move legality does — see the shortcut below).
+// Callers can pass a modified `occ` (typically our king removed) so slider
+// rays see through blockers that are about to move.
+Bitboard attacks_by(const Position& pos, Color by, Bitboard occ) {
+    Bitboard atk = 0;
+    Bitboard pawns = pos.pieces[by][PAWN];
+    if (by == WHITE) {
+        atk |= ((pawns & ~FILE_A_BB) << 7) | ((pawns & ~FILE_H_BB) << 9);
+    } else {
+        atk |= ((pawns & ~FILE_H_BB) >> 7) | ((pawns & ~FILE_A_BB) >> 9);
+    }
+    Bitboard b = pos.pieces[by][KNIGHT];
+    while (b) atk |= KNIGHT_ATTACKS[pop_lsb(b)];
+    Bitboard bq = pos.pieces[by][BISHOP] | pos.pieces[by][QUEEN];
+    while (bq) atk |= bishop_attacks(pop_lsb(bq), occ);
+    Bitboard rq = pos.pieces[by][ROOK]   | pos.pieces[by][QUEEN];
+    while (rq) atk |= rook_attacks  (pop_lsb(rq), occ);
+    Bitboard k = pos.pieces[by][KING];
+    while (k) atk |= KING_ATTACKS[pop_lsb(k)];
+    return atk;
+}
+
 // Is `sq` attacked by any piece of color `by` in the current occupancy?
 // Symmetric-attack trick for leapers: pieces that attack `sq` sit on the
 // same squares that a same-role piece AT `sq` would attack — with the
@@ -289,29 +313,41 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
     generate_slider_moves(pos, moves, captures_only);
     if (!captures_only) generate_castling(pos, moves);
 
-    // Legality filter with a fast shortcut. The classical "make each move,
-    // check if king is attacked, unmake" is safe but pays 100+ ns per move
-    // for the make/unmake+attack scan. We only need it for the moves that
-    // could actually leave our king in check:
+    // Legality filter with fast shortcuts. Classical make/unmake+attack
+    // scan is ~100 ns per move; we only need it for moves that could
+    // actually leave our king in check:
     //
-    //   - We're already in check   → any response might fail; verify all.
-    //   - It's a king move          → destination might be attacked.
-    //   - The piece is pinned       → moving off the pin line exposes king.
-    //   - En passant                → weird horizontal-pin cases (rare).
+    //   - In check                        → any response might fail; verify all
+    //   - King capture                    → captured piece might be sole attacker
+    //   - En passant                      → weird horizontal-pin cases
+    //   - Pinned piece                    → moving off the pin line exposes king
     //
-    // Everything else is guaranteed legal by construction — a non-pinned
-    // non-king move by definition can't expose the king when we're not
-    // already in check. That covers the vast majority of moves at any
-    // typical position and skips the make/unmake round-trip entirely.
-    const bool in_check_now = in_check(pos);
-    const Bitboard pinned = compute_pinned(pos);
-    const Bitboard king_bb = pos.pieces[pos.side_to_move][KING];
-    const Square king_sq = king_bb ? lsb(king_bb) : NO_SQUARE;
+    // Two special shortcuts on top of that:
+    //
+    //   - Non-capture king moves          → precomputed enemy attack map
+    //     (own king removed from occupancy so sliders see through where
+    //     the king stood) tells us in one AND whether the destination is
+    //     safe. No make/unmake needed.
+    //   - Castling                        → generate_castling already
+    //     verified all three king squares are unattacked; skip the filter.
+    const bool     in_check_now = in_check(pos);
+    const Bitboard pinned       = compute_pinned(pos);
+    const Bitboard king_bb      = pos.pieces[pos.side_to_move][KING];
+    const Square   king_sq      = king_bb ? lsb(king_bb) : NO_SQUARE;
+    const Bitboard enemy_atk_no_king = king_bb
+        ? attacks_by(pos, Color(us ^ 1), pos.occupied ^ king_bb)
+        : 0;
 
     moves.erase(
         std::remove_if(moves.begin(), moves.end(),
                        [&](Move m) {
+                           if (move_type(m) == MT_CASTLING) return false;
                            Square from = move_from(m);
+                           Square to   = move_to(m);
+                           if (from == king_sq && pos.board[to] == NO_PIECE) {
+                               // Non-capture king move: illegal iff dest is attacked.
+                               return (square_bb(to) & enemy_atk_no_king) != 0;
+                           }
                            bool needs_full_check =
                                in_check_now                            ||
                                from == king_sq                         ||
