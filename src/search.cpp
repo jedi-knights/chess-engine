@@ -61,9 +61,16 @@ struct SearchContext {
     // Butterfly-board history: keyed by (side, piece_type, dest_square).
     // Incremented by depth² on quiet-move beta cutoffs — deeper cutoffs
     // are stronger evidence the move is a general good idea for that
-    // (piece, destination) combination.
+    // (piece, destination) combination. Capped at HISTORY_MAX so entries
+    // can't crawl above the losing-capture ordering band (100k) or the
+    // killer bands (800k, 900k) over long searches with many cutoffs.
     int  history[NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES] = {};
 };
+
+// Ceiling on any single (side, piece, dest) history slot. Sits well
+// below the losing-capture band (100k) so band ordering is preserved:
+// TT > cap/promo > killers > losing cap/promo > history-quiets.
+constexpr int HISTORY_MAX = 16'000;
 
 // Poll for cancellation reasons every ~1024 nodes. Both the wall-clock
 // deadline and the external `stop` flag use this cadence; on every-node
@@ -503,7 +510,9 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                     ctx.killers[ply][0] = m;
                 }
                 PieceType pt = type_of(pos.board[move_from(m)]);
-                ctx.history[pos.side_to_move][pt][move_to(m)] += depth * depth;
+                int& h = ctx.history[pos.side_to_move][pt][move_to(m)];
+                h += depth * depth;
+                if (h > HISTORY_MAX) h = HISTORY_MAX;
             }
             break;
         }
