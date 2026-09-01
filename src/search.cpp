@@ -224,16 +224,25 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     return alpha;
 }
 
-// Negamax with alpha-beta + TT. `ply` is distance from the root so we can
-// prefer shorter mates (deeper mate scores are penalized), and shorter
-// paths out of a losing position (later mates score less negative).
+// Negamax with alpha-beta + TT + PVS + LMR + check extensions.
+// `ply` is distance from the root so we can prefer shorter mates
+// (deeper mate scores are penalized) and shorter paths out of a
+// losing position (later mates score less negative).
 int negamax(Position& pos, int depth, int alpha, int beta,
             int ply, SearchContext& ctx) {
     ++ctx.nodes;
     if (ctx.stopped || should_stop(ctx)) { ctx.stopped = true; return 0; }
+
+    // Check extension: when the side to move is in check, tactical lines
+    // are often deeper than the requested depth. Extend by one ply so
+    // mate combinations don't fall off the horizon. Computed once here
+    // and reused for LMR gating below.
+    const bool node_in_check = in_check(pos);
+    if (node_in_check) depth += 1;
+
     // Leaf: hand off to quiescence rather than static-evaluating a
-    // position that may be mid-exchange. See qsearch for the rationale.
-    if (depth == 0) return qsearch(pos, alpha, beta, ply, ctx);
+    // position that may be mid-exchange.
+    if (depth <= 0) return qsearch(pos, alpha, beta, ply, ctx);
 
     // TT probe: may return an immediately-usable score, and always hands
     // back a move to try first if the key was seen before.
@@ -247,7 +256,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     generate_moves(pos, moves);
 
     if (moves.empty()) {
-        if (in_check(pos)) return -MATE_SCORE + ply;
+        if (node_in_check) return -MATE_SCORE + ply;
         return 0;   // stalemate
     }
 
@@ -255,39 +264,45 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     score_moves(pos, moves, scores, tt_move, ctx, ply);
 
     const int original_alpha = alpha;
-    const bool node_in_check = in_check(pos);
     int  best      = -INF;
     Move best_move = NULL_MOVE;
     for (int i = 0; i < moves.size(); ++i) {
         pick_move_to_front(moves, scores, i);
         Move m = moves[i];
 
-        // LMR (Late Move Reductions): after the first few well-ordered
-        // moves at deep-enough depths, quiet non-promotion moves are
-        // very unlikely to beat alpha. Search them at REDUCED depth
-        // first; only if that "verification" search returns a score
-        // that improves alpha do we pay the full-depth cost. Cutoffs
-        // stay correct because if the reduced score exceeds alpha, we
-        // re-search — we never accept a reduced score.
-        const bool is_cap = is_capture(pos, m);
-        const bool is_promo = move_type(m) == MT_PROMOTION;
-        const bool can_reduce = depth >= 3 && i >= 4
-                              && !is_cap && !is_promo && !node_in_check;
+        const bool is_cap    = is_capture(pos, m);
+        const bool is_promo  = move_type(m) == MT_PROMOTION;
 
         UndoInfo u;
         pos.make_move(m, u);
 
+        // PVS + LMR:
+        //   - First move (i==0) is our best guess — search at full window
+        //     and full depth to establish the PV.
+        //   - Later moves are much less likely to beat alpha. Probe with
+        //     a NULL WINDOW (`-alpha-1, -alpha`) — cheapest possible way
+        //     to answer "does this move improve alpha?" On quiet non-
+        //     promotion moves at deep-enough depths we also REDUCE depth
+        //     (LMR) since late quiet moves rarely change the eval much.
+        //   - If the null-window probe fails high (score > alpha), the
+        //     move actually might be good — pay full window + full depth
+        //     to get a real score.
         int score;
-        if (can_reduce) {
-            int reduction = (i >= 12) ? 2 : 1;
-            score = -negamax(pos, depth - 1 - reduction, -beta, -alpha, ply + 1, ctx);
-            if (score > alpha) {
-                // Reduced search suggested this move improves alpha —
-                // pay the cost of verifying at full depth.
+        if (i == 0) {
+            score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
+        } else {
+            const bool can_reduce = depth >= 3 && !is_cap && !is_promo
+                                  && !node_in_check;
+            const int  reduction  = can_reduce ? ((i >= 12) ? 2 : 1) : 0;
+            score = -negamax(pos, depth - 1 - reduction,
+                             -alpha - 1, -alpha, ply + 1, ctx);
+            if (score > alpha && (reduction > 0 || score < beta)) {
+                // Verified at full depth + full window. Two triggers:
+                // reduced probe found something (need real depth), or
+                // null-window failed high inside the ACTUAL window
+                // (need real score, not just "> alpha" upper bound).
                 score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
             }
-        } else {
-            score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
         }
 
         pos.unmake_move(m, u);
