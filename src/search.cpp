@@ -116,33 +116,51 @@ constexpr int SEE_VALUE[NUM_PIECE_TYPES] = {
 // all captures on `move_to(m)` play out with each side always using its
 // least-valuable available attacker. Positive means we come out ahead.
 //
+// Handles both captures and promotions (including non-capture promotions):
+// a promoting pawn contributes `promo - PAWN` to the immediate gain and
+// enters the swap AS the promoted piece, so recaptures value it correctly.
+//
 // Reference: Chess Programming Wiki, "SEE" — the classic gain[] array
 // with minimax backup. Xray attackers (pieces revealed after a blocker
 // captures away) are handled by recomputing slider attacks against the
 // remaining occupancy after each removal.
 int see(const Position& pos, Move m) {
-    const Square to   = move_to(m);
-    const Square from = move_from(m);
-    const bool is_ep  = move_type(m) == MT_EN_PASSANT;
+    const Square to      = move_to(m);
+    const Square from    = move_from(m);
+    const bool   is_ep   = move_type(m) == MT_EN_PASSANT;
+    const bool   is_promo= move_type(m) == MT_PROMOTION;
 
     // Victim value. En passant captures a pawn even though the target
-    // square is empty. Non-captures (no victim on `to` and not ep)
-    // shouldn't be passed to see(); return 0 defensively.
+    // square is empty. A non-capture promotion has no victim but still
+    // has a promotion gain, so we allow it through. Anything else with
+    // no victim shouldn't be passed to see(); return 0 defensively.
     int victim_value;
     if (is_ep) {
         victim_value = SEE_VALUE[PAWN];
     } else if (pos.board[to] != NO_PIECE) {
         victim_value = SEE_VALUE[type_of(pos.board[to])];
+    } else if (is_promo) {
+        victim_value = 0;
     } else {
         return 0;
     }
 
+    // A promoting pawn leaves the square worth its promoted piece, and
+    // gains (promoted - pawn) material immediately. Subsequent recaptures
+    // are captures OF the promoted piece, so the attacker type upgrades too.
+    PieceType attacker_type = type_of(pos.board[from]);
+    int promo_bonus = 0;
+    if (is_promo) {
+        PieceType promo = move_promotion(m);
+        promo_bonus     = SEE_VALUE[promo] - SEE_VALUE[PAWN];
+        attacker_type   = promo;
+    }
+
     int gain[32];
     int d = 0;
-    gain[d] = victim_value;
+    gain[d] = victim_value + promo_bonus;
 
-    PieceType attacker_type = type_of(pos.board[from]);
-    Bitboard  occ           = pos.occupied ^ square_bb(from);
+    Bitboard occ = pos.occupied ^ square_bb(from);
     if (is_ep) {
         // The captured pawn sits on an adjacent square, not `to` — remove
         // it from occupancy so xray computations see through the gap.
@@ -208,48 +226,38 @@ int see(const Position& pos, Move m) {
     return gain[0];
 }
 
-// Ordering bands, now with SEE distinguishing winning captures (which
-// beat killers and quiets) from losing captures (which drop below
-// killers — trying them first would prune away real moves):
+// Ordering bands, driven by SEE for anything material-touching:
 //
-//   TT move            : 10,000,000
-//   Winning capture    :  1,000,000 + SEE
-//   Killer 1           :    900,000
-//   Killer 2           :    800,000
-//   Losing capture     :    100,000 + SEE            (still above quiets)
-//   Quiet (history)    :          0 .. ~500,000
-constexpr int PIECE_ORDER_VALUE[NUM_PIECE_TYPES] = {
-    0, 100, 320, 330, 500, 900, 20000,
-};
-
+//   TT move                       : 10,000,000
+//   Winning cap/promo (SEE >= 0)  :  1,000,000 + SEE
+//   Killer 1                      :    900,000
+//   Killer 2                      :    800,000
+//   Losing cap/promo (SEE  < 0)   :    100,000 + SEE   (still above quiets)
+//   Quiet (history)               :          0 .. ~HISTORY_MAX
+//
+// Non-capture promotions go through the SEE path too — a non-capture
+// promotion to queen is worth +800 raw, and SEE catches the case where
+// an opponent piece can recapture the promoted queen for a net loss.
 int move_ordering_score(const Position& pos, Move m, Move tt_move,
                         const SearchContext& ctx, int ply) {
     if (m == tt_move) return 10'000'000;
 
-    int score = 0;
+    const bool cap   = is_capture(pos, m);
+    const bool promo = move_type(m) == MT_PROMOTION;
 
-    if (is_capture(pos, m)) {
+    if (cap || promo) {
         int see_score = see(pos, m);
-        // Winning-or-equal captures go above killers; losing captures
-        // drop below them but stay above quiet moves so the search
-        // still considers them.
-        score = (see_score >= 0)
+        return (see_score >= 0)
             ? (1'000'000 + see_score)
             : (  100'000 + see_score);
-    } else {
-        const int p = (ply < MAX_PLY) ? ply : MAX_PLY - 1;
-        if      (m == ctx.killers[p][0]) score = 900'000;
-        else if (m == ctx.killers[p][1]) score = 800'000;
-        else {
-            PieceType pt = type_of(pos.board[move_from(m)]);
-            score = ctx.history[pos.side_to_move][pt][move_to(m)];
-        }
     }
 
-    if (move_type(m) == MT_PROMOTION) {
-        score += PIECE_ORDER_VALUE[move_promotion(m)];
-    }
-    return score;
+    const int p = (ply < MAX_PLY) ? ply : MAX_PLY - 1;
+    if      (m == ctx.killers[p][0]) return 900'000;
+    else if (m == ctx.killers[p][1]) return 800'000;
+
+    PieceType pt = type_of(pos.board[move_from(m)]);
+    return ctx.history[pos.side_to_move][pt][move_to(m)];
 }
 
 // Precompute ordering scores in parallel with the moves list. Called
@@ -485,10 +493,11 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         if (score > best)  { best = score; best_move = m; }
         if (score > alpha) alpha = score;
         if (alpha >= beta) {
-            // Beta cutoff on a quiet move: record it as a killer at this
-            // ply and bump its history. Captures already order well via
-            // MVV-LVA so we don't polute those tables with them.
-            if (!is_capture(pos, m) && ply < MAX_PLY) {
+            // Beta cutoff on a quiet, non-promotion move: record as a
+            // killer at this ply and bump history. Captures and promos
+            // already order well via SEE, so we skip them to avoid
+            // polluting the tables with forcing moves.
+            if (!is_cap && !is_promo && ply < MAX_PLY) {
                 if (ctx.killers[ply][0] != m) {
                     ctx.killers[ply][1] = ctx.killers[ply][0];
                     ctx.killers[ply][0] = m;
