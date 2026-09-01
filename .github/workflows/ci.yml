@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Ubuntu runners come with clang, llvm, and lcov pre-installed on
+# recent images, but we install explicitly for reproducibility and
+# so a future runner-image change doesn't silently break the build.
+
+jobs:
+  test:
+    name: Test (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
+      - name: Build + run tests
+        run: make test
+
+  lint:
+    name: Lint (clang-tidy)
+    runs-on: ubuntu-latest
+    # Advisory — matches `make lint` semantics locally (reports warnings
+    # but doesn't fail the build). Flip to fail-on-warning once the
+    # remaining clang-tidy findings are cleaned up: add
+    # `--warnings-as-errors=*` to the invocation in Makefile.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-tidy
+      - name: Lint
+        run: make lint
+
+  coverage:
+    name: Coverage (LCOV + genhtml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain + coverage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm lcov
+      - name: Generate coverage
+        run: make coverage
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/html/
+          retention-days: 14
+      - name: Upload LCOV info
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 14
