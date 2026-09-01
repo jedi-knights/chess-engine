@@ -2,6 +2,7 @@
 #include "eval.h"
 #include "movegen.h"
 #include "tt.h"
+#include "zobrist.h"
 
 #include <algorithm>
 #include <chrono>
@@ -250,6 +251,47 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     Move tt_move  = NULL_MOVE;
     if (tt().probe(pos.key, depth, alpha, beta, tt_score, tt_move)) {
         return score_from_tt(tt_score, ply);
+    }
+
+    // Null-move pruning: at non-PV interior nodes with sufficient
+    // material, we let the opponent play two moves in a row (i.e., pass
+    // our turn) and search at reduced depth. If the position is STILL
+    // good enough to beat beta, our real move can only be better —
+    // prune. Reduction R = 3 is the classical default.
+    //
+    // Guards:
+    //  - Not in check (can't "pass" in check — it's illegal).
+    //  - depth >= 3 (below that the reduced search is qsearch anyway).
+    //  - Beta isn't a mate score (mate detection needs the real search).
+    //  - Side to move has at least one non-pawn non-king piece
+    //    (zugzwang guard: in pure king-pawn endgames, passing is often
+    //    strictly worse than any real move, so null-move gives false
+    //    prunings that lose the game).
+    const bool has_non_pawn = pos.pieces[pos.side_to_move][KNIGHT] |
+                              pos.pieces[pos.side_to_move][BISHOP] |
+                              pos.pieces[pos.side_to_move][ROOK]   |
+                              pos.pieces[pos.side_to_move][QUEEN];
+    if (depth >= 3 && !node_in_check && has_non_pawn &&
+        std::abs(beta) < MATE_SCORE - 1000) {
+        // Make null move inline (no ~30-byte UndoInfo, no board changes):
+        // just flip side, clear ep, adjust Zobrist for those two.
+        const Square   saved_ep  = pos.ep_square;
+        const uint64_t saved_key = pos.key;
+        if (saved_ep != NO_SQUARE) pos.key ^= zobrist::EP_FILE[file_of(saved_ep)];
+        pos.ep_square    = NO_SQUARE;
+        pos.side_to_move = Color(pos.side_to_move ^ 1);
+        pos.key         ^= zobrist::SIDE;
+
+        constexpr int R = 3;
+        int null_score = -negamax(pos, depth - 1 - R,
+                                  -beta, -beta + 1, ply + 1, ctx);
+
+        pos.side_to_move = Color(pos.side_to_move ^ 1);
+        pos.ep_square    = saved_ep;
+        pos.key          = saved_key;
+
+        if (ctx.stopped) return 0;
+        if (null_score >= beta) return beta;      // fail-high: prune the whole subtree
     }
 
     MoveList moves;
