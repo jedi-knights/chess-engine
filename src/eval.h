@@ -5,10 +5,14 @@
 // Static evaluation from the side-to-move's perspective — positive scores
 // mean the position is better for whoever is about to move.
 //
-// The heavy lifting (material sum + PST accumulation) is done incrementally
-// by Position::put_piece / remove_piece so `evaluate` itself is O(1): read
-// the four cached sums, subtract, phase-interpolate, sign-flip.
+// Material + PST is O(1) via Position::psq_mg / psq_eg (incremental).
+// Mobility and passed pawns are computed per-call (small: a handful of
+// popcount and bitboard operations each).
 int evaluate(const Position& pos);
+
+// Populate per-square passed-pawn masks. Must be called once at startup
+// before any evaluate() call.
+namespace eval { void init(); }
 
 // Piece-square + material tables exposed so Position can maintain
 // psq_mg / psq_eg incrementally. Not intended for other consumers.

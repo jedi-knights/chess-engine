@@ -1,6 +1,10 @@
 #include "eval.h"
+#include "attacks.h"
 #include "bitboard.h"
+#include "magic.h"
 #include "types.h"
+
+#include <algorithm>
 
 namespace eval {
 
@@ -135,12 +139,115 @@ static int compute_phase(const Position& pos) {
     return phase > PHASE_MAX ? PHASE_MAX : phase;
 }
 
+// --- Passed pawns -------------------------------------------------------
+// For each (color, square): bitboard of squares on the same file or an
+// adjacent file, on ranks IN FRONT of the pawn (from that color's
+// perspective). If no enemy pawns intersect, our pawn is passed.
+static Bitboard PASSED_PAWN_MASK[NUM_COLORS][NUM_SQUARES];
+
+// Bonus per rank a passed pawn has advanced. Indexed by "how far from
+// starting rank" — rank 2 = 0 advance, rank 7 = 5 advances. MG values
+// are conservative (a passed pawn is nice but the middlegame is about
+// pieces); EG values are large (a passed pawn IS the endgame).
+static constexpr int PASSED_MG[8] = { 0,  5, 10, 20, 35, 60, 90, 0 };
+static constexpr int PASSED_EG[8] = { 0, 10, 25, 45, 75, 120, 200, 0 };
+
+namespace eval {
+void init() {
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int sq = 0; sq < NUM_SQUARES; ++sq) {
+            Bitboard mask = 0;
+            int f = file_of(Square(sq));
+            int r = rank_of(Square(sq));
+            for (int ff = std::max(0, f - 1); ff <= std::min(7, f + 1); ++ff) {
+                if (c == WHITE) {
+                    for (int rr = r + 1; rr <= 7; ++rr)
+                        mask |= square_bb(make_square(File(ff), Rank(rr)));
+                } else {
+                    for (int rr = r - 1; rr >= 0; --rr)
+                        mask |= square_bb(make_square(File(ff), Rank(rr)));
+                }
+            }
+            PASSED_PAWN_MASK[c][sq] = mask;
+        }
+    }
+}
+}  // namespace eval
+
+// Sum passed-pawn bonuses for `us`. Returns a pair of (mg_bonus, eg_bonus)
+// packed into two accumulator refs — cheaper than one call per phase.
+static void passed_pawn_bonus(const Position& pos, Color us,
+                              int& mg_out, int& eg_out) {
+    int mg = 0, eg = 0;
+    const Bitboard enemy_pawns = pos.pieces[Color(us ^ 1)][PAWN];
+    Bitboard our_pawns = pos.pieces[us][PAWN];
+    while (our_pawns) {
+        Square s = pop_lsb(our_pawns);
+        if ((PASSED_PAWN_MASK[us][s] & enemy_pawns) == 0) {
+            // Advance rank from the pawn's starting side.
+            int adv = (us == WHITE) ? (rank_of(s) - 1) : (6 - rank_of(s));
+            if (adv >= 0 && adv < 8) {
+                mg += PASSED_MG[adv];
+                eg += PASSED_EG[adv];
+            }
+        }
+    }
+    mg_out += mg;
+    eg_out += eg;
+}
+
+// --- Mobility -----------------------------------------------------------
+// Cheap and effective: count squares each piece can move to (own pieces
+// blocked). Different weights per piece type reflect diminishing returns
+// (queens usually have plenty of mobility regardless).
+static constexpr int MOB_KNIGHT = 4;
+static constexpr int MOB_BISHOP = 3;
+static constexpr int MOB_ROOK   = 2;
+static constexpr int MOB_QUEEN  = 1;
+
+static int mobility(const Position& pos, Color us) {
+    const Bitboard occ = pos.occupied;
+    const Bitboard our = pos.colors[us];
+    int score = 0;
+
+    Bitboard b = pos.pieces[us][KNIGHT];
+    while (b) { Square s = pop_lsb(b);
+                score += MOB_KNIGHT * popcount(KNIGHT_ATTACKS[s] & ~our); }
+    b = pos.pieces[us][BISHOP];
+    while (b) { Square s = pop_lsb(b);
+                score += MOB_BISHOP * popcount(bishop_attacks(s, occ) & ~our); }
+    b = pos.pieces[us][ROOK];
+    while (b) { Square s = pop_lsb(b);
+                score += MOB_ROOK   * popcount(rook_attacks(s, occ)   & ~our); }
+    b = pos.pieces[us][QUEEN];
+    while (b) { Square s = pop_lsb(b);
+                score += MOB_QUEEN  * popcount(
+                    (bishop_attacks(s, occ) | rook_attacks(s, occ)) & ~our); }
+
+    return score;
+}
+
 int evaluate(const Position& pos) {
-    // Position maintains psq_mg / psq_eg incrementally via put_piece /
-    // remove_piece — the loop over pieces this used to do is gone.
     int mg_diff = pos.psq_mg[WHITE] - pos.psq_mg[BLACK];
     int eg_diff = pos.psq_eg[WHITE] - pos.psq_eg[BLACK];
-    int phase   = compute_phase(pos);
-    int score   = (mg_diff * phase + eg_diff * (PHASE_MAX - phase)) / PHASE_MAX;
+
+    // Mobility — favor active pieces. Applied at half weight in the
+    // endgame because open positions dominate mobility numbers there
+    // and can drown out material.
+    int mob_diff = mobility(pos, WHITE) - mobility(pos, BLACK);
+    mg_diff += mob_diff;
+    eg_diff += mob_diff / 2;
+
+    // Passed pawns — separate MG and EG tables since a passed pawn is
+    // a mild bonus in the middlegame and often decisive in the endgame.
+    int passed_w_mg = 0, passed_w_eg = 0;
+    int passed_b_mg = 0, passed_b_eg = 0;
+    passed_pawn_bonus(pos, WHITE, passed_w_mg, passed_w_eg);
+    passed_pawn_bonus(pos, BLACK, passed_b_mg, passed_b_eg);
+    mg_diff += passed_w_mg - passed_b_mg;
+    eg_diff += passed_w_eg - passed_b_eg;
+
+    int phase = compute_phase(pos);
+    int score = (mg_diff * phase + eg_diff * (PHASE_MAX - phase)) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
 }
