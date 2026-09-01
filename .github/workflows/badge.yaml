@@ -49,7 +49,12 @@ jobs:
       - name: Generate coverage reports
         run: |
           make coverage
-          lcov_cobertura coverage/lcov.info -o coverage.xml
+          # lcov_cobertura emits a DOCTYPE declaration that the
+          # coverage-badge action refuses to parse ("DOCTYPE declarations
+          # are not permitted in coverage files"). Strip it to match
+          # neospec's badge.yaml, which does the same for gocover-cobertura.
+          lcov_cobertura coverage/lcov.info -o coverage.raw.xml
+          grep -v '<!DOCTYPE' coverage.raw.xml > coverage.xml
         shell: bash
 
       - name: Update Coverage Badge
