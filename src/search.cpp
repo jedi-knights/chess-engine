@@ -188,31 +188,30 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
         if (stand_pat > alpha)   alpha = stand_pat;
     }
 
+    // In-check nodes need every legal move (evasion may require a quiet
+    // block or king step). Quiet nodes only need captures + promotions —
+    // stand_pat already handled the "do nothing" baseline.
     MoveList moves;
-    generate_moves(pos, moves);
+    if (checked) generate_moves   (pos, moves);
+    else         generate_captures(pos, moves);
 
     if (moves.empty()) {
-        // A terminal position reached via qsearch — same mate/stalemate
-        // resolution as full negamax at a leaf with no legal moves.
-        return checked ? (-MATE_SCORE + ply) : 0;
+        // Two very different meanings here:
+        //  - checked + no evasion → checkmate (mate-in-ply score)
+        //  - not checked + no captures → quiet, just return stand_pat via alpha
+        //    (stand-pat has already set alpha via the earlier update)
+        return checked ? (-MATE_SCORE + ply) : alpha;
     }
 
     // MVV-LVA: try highest-victim captures first so the strong replies
     // trigger beta cutoffs immediately. Qsearch doesn't probe the TT
-    // (leaves change rapidly and add little), so no move hint. Killers
-    // and history are quiet-move heuristics — qsearch only searches
-    // captures (except when in check) so they don't affect ordering here.
+    // (leaves change rapidly and add little), so no move hint.
     int scores[MoveList::MAX_MOVES];
     score_moves(pos, moves, scores, NULL_MOVE, ctx, ply);
 
     for (int i = 0; i < moves.size(); ++i) {
         pick_move_to_front(moves, scores, i);
         Move m = moves[i];
-        // When we're not in check, once scores drop below the capture band
-        // (base 1,000,000) every remaining move is quiet — no point picking
-        // and skipping them.
-        if (!checked && scores[i] < 1'000'000) break;
-        if (!checked && !is_capture(pos, m)) continue;   // safety guard
 
         UndoInfo u;
         pos.make_move(m, u);

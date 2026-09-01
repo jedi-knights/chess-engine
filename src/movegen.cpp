@@ -30,7 +30,10 @@ inline void emit_pawn_move(Square from, Square to, Bitboard promo_rank,
     }
 }
 
-void generate_pawn_moves(const Position& pos, MoveList& moves) {
+// captures_only=true skips pushes/double-pushes but still emits captures,
+// en passant, AND non-capture promotions (they're forcing tactical moves
+// that a qsearch shouldn't ignore).
+void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_only) {
     const Color    us    = pos.side_to_move;
     const Bitboard empty = ~pos.occupied;
     const Bitboard enemy = pos.colors[Color(us ^ 1)];
@@ -38,14 +41,16 @@ void generate_pawn_moves(const Position& pos, MoveList& moves) {
 
     if (us == WHITE) {
         Bitboard single = (pawns << 8) & empty;
-        // Double push: only pawns whose single push landed on rank 3
-        // (i.e., originated on rank 2). Occupancy of rank 3 is already
-        // enforced by `single`; occupancy of rank 4 by the second `& empty`.
         Bitboard dbl    = ((single & RANK_3_BB) << 8) & empty;
-        // Capture wraparound guard: exclude file-A pawns before NW shift
-        // (they'd wrap to file H one rank up), file-H pawns before NE shift.
         Bitboard cap_nw = ((pawns & ~FILE_A_BB) << 7) & enemy;
         Bitboard cap_ne = ((pawns & ~FILE_H_BB) << 9) & enemy;
+
+        if (captures_only) {
+            // Retain only pushes that promote (rank 8) — a queen appearing
+            // out of thin air is as forcing as any capture.
+            single &= RANK_8_BB;
+            dbl    = 0;
+        }
 
         while (single) { Square to = pop_lsb(single);
                          emit_pawn_move(Square(to - 8),  to, RANK_8_BB, MT_NORMAL, moves); }
@@ -70,6 +75,11 @@ void generate_pawn_moves(const Position& pos, MoveList& moves) {
         Bitboard dbl    = ((single & RANK_6_BB) >> 8) & empty;
         Bitboard cap_se = ((pawns & ~FILE_H_BB) >> 7) & enemy;
         Bitboard cap_sw = ((pawns & ~FILE_A_BB) >> 9) & enemy;
+
+        if (captures_only) {
+            single &= RANK_1_BB;
+            dbl    = 0;
+        }
 
         while (single) { Square to = pop_lsb(single);
                          emit_pawn_move(Square(to + 8),  to, RANK_1_BB, MT_NORMAL, moves); }
@@ -139,24 +149,26 @@ void generate_castling(const Position& pos, MoveList& moves) {
     }
 }
 
-void generate_slider_moves(const Position& pos, MoveList& moves) {
-    const Color    us  = pos.side_to_move;
-    const Bitboard our = pos.colors[us];
-    const Bitboard occ = pos.occupied;
+void generate_slider_moves(const Position& pos, MoveList& moves, bool captures_only) {
+    const Color    us    = pos.side_to_move;
+    const Bitboard our   = pos.colors[us];
+    const Bitboard enemy = pos.colors[Color(us ^ 1)];
+    const Bitboard occ   = pos.occupied;
+    // Full generation walks all reachable squares (minus own pieces);
+    // captures-only restricts targets to enemy occupancy.
+    const Bitboard target_mask = captures_only ? enemy : ~our;
 
-    // Bishops and queens share diagonal attacks; rooks and queens share
-    // orthogonal attacks. OR the piece bitboards to iterate each set once.
     Bitboard diag = pos.pieces[us][BISHOP] | pos.pieces[us][QUEEN];
     while (diag) {
         Square from = pop_lsb(diag);
-        Bitboard targets = bishop_attacks(from, occ) & ~our;
+        Bitboard targets = bishop_attacks(from, occ) & target_mask;
         while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
     }
 
     Bitboard orth = pos.pieces[us][ROOK] | pos.pieces[us][QUEEN];
     while (orth) {
         Square from = pop_lsb(orth);
-        Bitboard targets = rook_attacks(from, occ) & ~our;
+        Bitboard targets = rook_attacks(from, occ) & target_mask;
         while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
     }
 }
@@ -187,43 +199,48 @@ bool in_check(const Position& pos) {
                               Color(pos.side_to_move ^ 1));
 }
 
-void generate_moves(Position& pos, MoveList& moves) {
+// Shared implementation for generate_moves (all legal) and generate_captures
+// (captures + non-capture promotions only). Castling is never a capture,
+// so it's skipped in captures_only mode. Legality post-filter runs in both.
+void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
     const Color    us         = pos.side_to_move;
     const Bitboard our_pieces = pos.colors[us];
-    Bitboard       knights    = pos.pieces[us][KNIGHT];
+    const Bitboard enemy      = pos.colors[Color(us ^ 1)];
+    // Full generation → all squares minus own pieces. Captures-only →
+    // just enemy squares (leaper attack sets & enemy).
+    const Bitboard target_mask = captures_only ? enemy : ~our_pieces;
 
+    Bitboard knights = pos.pieces[us][KNIGHT];
     while (knights) {
         Square from = pop_lsb(knights);
-        Bitboard targets = KNIGHT_ATTACKS[from] & ~our_pieces;
-        while (targets) {
-            Square to = pop_lsb(targets);
-            moves.push_back(make_move(from, to));
-        }
+        Bitboard targets = KNIGHT_ATTACKS[from] & target_mask;
+        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
     }
 
     // Loop, not `if`, so contrived test positions with 0 or 2+ kings don't
-    // crash the generator. Castling is milestone 6; king-adjacency and
-    // move-into-check filtering are milestone 7.
+    // crash the generator.
     Bitboard kings = pos.pieces[us][KING];
     while (kings) {
         Square from = pop_lsb(kings);
-        Bitboard targets = KING_ATTACKS[from] & ~our_pieces;
-        while (targets) {
-            Square to = pop_lsb(targets);
-            moves.push_back(make_move(from, to));
-        }
+        Bitboard targets = KING_ATTACKS[from] & target_mask;
+        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
     }
 
-    generate_pawn_moves(pos, moves);
-    generate_slider_moves(pos, moves);
-    generate_castling(pos, moves);
+    generate_pawn_moves  (pos, moves, captures_only);
+    generate_slider_moves(pos, moves, captures_only);
+    if (!captures_only) generate_castling(pos, moves);
 
     // Post-filter: drop any pseudo-legal move that leaves our king in check.
-    // Castling is already legality-filtered inside generate_castling, but
-    // is_legal is cheap on those and produces the same answer, so uniform
-    // filtering here is simpler than trying to short-circuit them out.
     moves.erase(
         std::remove_if(moves.begin(), moves.end(),
                        [&](Move m) { return !is_legal(pos, m); }),
         moves.end());
+}
+
+void generate_moves(Position& pos, MoveList& moves) {
+    generate_moves_impl(pos, moves, /*captures_only=*/false);
+}
+
+void generate_captures(Position& pos, MoveList& moves) {
+    generate_moves_impl(pos, moves, /*captures_only=*/true);
 }

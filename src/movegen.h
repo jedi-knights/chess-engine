@@ -21,6 +21,13 @@
 // Reference: https://www.chessprogramming.org/Move_Generation
 void generate_moves(Position& pos, MoveList& moves);
 
+// Generates only "loud" moves — every capture (including en passant) plus
+// non-capture promotions (a queen appearing is as forcing as a capture).
+// Skips quiet pushes, quiet piece moves, and castling. Used by qsearch to
+// avoid the "generate all, filter to captures" waste. Legality-filtered
+// on the same code path as generate_moves.
+void generate_captures(Position& pos, MoveList& moves);
+
 // Is the side-to-move's king currently under attack? Search uses this at
 // terminal nodes to distinguish checkmate (no moves + in check → losing)
 // from stalemate (no moves + not in check → draw).
