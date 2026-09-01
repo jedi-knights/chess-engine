@@ -35,8 +35,8 @@ This project builds each layer as a validated milestone. Every commit is a well-
 
 ```bash
 $ make test
-[doctest] test cases:    11 |    11 passed | 0 failed | 0 skipped
-[doctest] assertions: 37456 | 37456 passed | 0 failed |
+[doctest] test cases:    144 |    144 passed | 0 failed | 0 skipped
+[doctest] assertions: 270026 | 270026 passed | 0 failed |
 
 $ ./engine perft 2 | grep "Startpos" -A 2
 === Startpos ===
@@ -46,20 +46,20 @@ $ ./engine perft 2 | grep "Startpos" -A 2
 
 ## Features
 
-Currently implemented (all 8 milestones complete):
+Currently implemented (all 8 milestones plus post-roadmap search / eval / UCI work):
 
 - Bitboard position representation (piece mailbox + per-color/per-type bitboards + occupancy)
 - FEN parsing and emission (round-tripped by the test suite)
-- `Position::make_move` / `unmake_move` with a caller-owned `UndoInfo` — supports normal, capture, en passant, castling, and promotion move types
-- **Fully legal** move generation for all piece types (knights, king, pawns with all special cases, sliders, castling) with a king-not-in-check legality filter. Perft matches the six standard positions through depth 4 (~10.7M node checks).
+- `Position::make_move` / `unmake_move` with a caller-owned `UndoInfo` — supports normal, capture, en passant, castling, and promotion move types. Incremental Zobrist key + incremental piece-square accumulators + repetition-key history stack.
+- **Fully legal** move generation for all piece types (knights, king, pawns with all special cases, sliders, castling) with a pin-aware legality filter (make/unmake only when the shortcut can't rule the move in/out) and a precomputed enemy-attack bitboard for king-move legality. Perft matches all six standard positions through depth 5 (~200M node checks); `make perft-cert` extends to depth 6 (~8B nodes) as an offline correctness gate.
 - Precomputed leaper attack tables (knight, king, pawn) + **magic bitboards for sliders** (O(1) bishop/rook/queen attack lookups; magic numbers found at init via seeded random search)
 - Perft driver and 6-position standard test suite
-- Material evaluation with **piece-square tables** (Simplified Evaluation Function values) and **tapered eval** — king PST interpolates linearly between middlegame (safety) and endgame (centralization) tables by remaining non-pawn material. Score in centipawns from side-to-move perspective.
-- **Iterative-deepening negamax with alpha-beta pruning** + **quiescence search** at leaves (extends captures until quiet, resolves horizon-effect blunders) + **MVV-LVA move ordering** + **Zobrist-hashed transposition table** (~1M entries, EXACT/LOWER/UPPER bounds, mate-score ply adjustment) + **killer moves and history heuristic** (order quiet-move beta-cutoffs first); ~11.6× speedup over baseline alpha-beta at depth 6; supports `go movetime N` with mid-iteration cancellation (any-time property); `ucinewgame` clears the TT
-- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`/`infinite`, `stop`, `d`, `quit`) with per-iteration `info` lines and `bestmove` output; `go infinite` runs asynchronously so the engine keeps reading commands
-- doctest unit test suite (64 cases) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
+- Evaluation: material + **piece-square tables** (Simplified Evaluation Function) with **tapered eval** (king PST interpolates linearly between middlegame safety and endgame centralization by non-pawn phase), **safe mobility** (per-piece weighted attack squares excluding enemy pawn attacks), **passed pawns** (separate MG/EG rank bonuses via precomputed masks), and a **bishop pair** bonus. Incremental PSQ so the hot path pays no per-piece loop.
+- Search: **iterative-deepening negamax** with alpha-beta + **quiescence** (captures + promotions, in-check evasion, SEE-pruned) + **aspiration windows** (±75 cp, doubling on fail) + **Zobrist-hashed TT** (~1M entries, EXACT/LOWER/UPPER, mate-score ply-adjusted) + **PVS** (root and internal) + **null-window LMR** + **null-move pruning** (R=3, zugzwang-guarded) + **check extensions** + **reverse futility** + **razoring** + **SEE**-scored capture/promotion ordering (winning above killers, losing below) + **killer moves** + **history heuristic** (capped) + **repetition + 50-move** draw detection. Startpos reaches depth 10 in ~27 ms / ~301k nodes with a full 10-ply PV.
+- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`/`infinite`, `stop`, `d`, `quit`) on a background `std::thread`; per-iteration `info` lines emit `depth score cp nodes nps time pv <full line walked from the TT>`; `ucinewgame` clears the TT; `go infinite` runs asynchronously; sending `position` mid-search surfaces an `info string` before canceling.
+- doctest unit test suite (144 cases / 270k assertions) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
-Post-roadmap ideas (see CLAUDE.md): iterative deepening + time management, move ordering (MVV-LVA / killers / history), quiescence search, transposition table with Zobrist hashing, magic bitboards, piece-square tables, `position ... moves e2e4 ...` UCI extension.
+Post-roadmap ideas still open (see `CLAUDE.md` non-goals): opening book / endgame tablebases, multi-threading (Lazy SMP), pondering, MultiPV output, NNUE eval.
 
 ## Requirements
 
@@ -100,7 +100,7 @@ The `go` command runs iterative-deepening alpha-beta search. Supported forms:
 - `go infinite` — search until `stop`. Runs asynchronously on a background thread; the engine keeps reading commands.
 - `go` (no args) — default depth 4
 
-Each completed depth emits a UCI `info` line with depth, centipawn score, node count, and the root move as PV, followed by `bestmove`.
+Each completed depth emits a UCI `info` line with `depth`, `score cp`, `nodes`, `nps`, `time`, and the full principal variation (walked from the TT), followed by `bestmove`.
 
 ## Examples
 
@@ -136,11 +136,12 @@ $ ./engine perft 2
   [OK  ] depth 1: got 20, expected 20
   [OK  ] depth 2: got 400, expected 400
 === Kiwipete ===
-  [FAIL] depth 1: got 21, expected 48
+  [OK  ] depth 1: got 48, expected 48
+  [OK  ] depth 2: got 2039, expected 2039
 ...
 ```
 
-Startpos matches exactly at milestone 4; other positions require sliding pieces + castling + a legality filter to reach their targets.
+All six positions match through depth 5 (`make perft`, ~200M nodes). `make perft-cert` runs depth 6 (~8B nodes, ~10 minutes) as an offline gate before shipping movegen changes.
 
 ## Configuration
 
@@ -149,11 +150,12 @@ None. No environment variables, no config files. The engine reads UCI on stdin a
 ## Development
 
 ```bash
-make          # release build (-O3 -march=native) → ./engine
-make debug    # -O0 -g with AddressSanitizer + UndefinedBehaviorSanitizer
-make test     # compile + run the doctest suite under ASan            → ./tests/run
-make perft    # ./engine perft 5
-make run      # ./engine
+make            # release build (-O3 -march=native) → ./engine
+make debug      # -O0 -g with AddressSanitizer + UndefinedBehaviorSanitizer
+make test       # compile + run the doctest suite under ASan            → ./tests/run
+make perft      # ./engine perft 5 (~200M nodes; standard correctness gate)
+make perft-cert # ./engine perft 6 (~8B nodes, ~10 min; offline gate before shipping movegen changes)
+make run        # ./engine
 make clean
 ```
 
@@ -164,11 +166,22 @@ src/
   types.h            Bitboard / Move / Piece / Square + encoding helpers
   bitboard.[h|cpp]   popcount, lsb, pretty-print
   attacks.[h|cpp]    precomputed knight / king / pawn attack tables
-  position.[h|cpp]   Position, FEN parsing, make_move / unmake_move + UndoInfo
-  movegen.[h|cpp]    generate_moves — knights, king, pawns as of milestone 4
+  magic.[h|cpp]      magic bitboards — init-time search + O(1) slider attacks
+  zobrist.[h|cpp]    Zobrist keys + init + full-recompute reference
+  position.[h|cpp]   Position, FEN, make_move / unmake_move + UndoInfo;
+                     incremental Zobrist + PSQ; repetition-key stack
+  movegen.[h|cpp]    generate_moves (fully legal) + in_check; pin-aware +
+                     enemy-attack shortcuts skip most make/unmake round-trips
   perft.[h|cpp]      perft driver + 6-position standard suite
-  uci.[h|cpp]        UCI protocol loop
-  main.cpp           entry point
+  eval.[h|cpp]       material + PST + tapered + mobility + passed pawn +
+                     bishop pair
+  tt.[h|cpp]         transposition table (fixed-size direct-mapped)
+  search.[h|cpp]     iterative-deepening negamax + qsearch + TT + SEE + PVS
+                     + LMR + null-move + check extensions + RFP + razoring
+                     + killers + capped history + aspiration + repetition
+  notation.[h|cpp]   UCI move ↔ Move (move_to_uci, parse_uci_move)
+  uci.[h|cpp]        UCI protocol loop on a background std::thread
+  main.cpp           entry point (dispatches `perft` or falls into UCI)
 tests/               doctest suite; one file per src unit under test
 third_party/
   doctest.h          v2.4.11 (pinned single-header)
@@ -188,7 +201,7 @@ The workflow:
 
 1. Pick the next unstarted milestone (or file an issue proposing something else)
 2. Fork and branch: `git checkout -b feat/milestone-N-<name>`
-3. Implement, run `make test`, run `make perft 5` — verify no regression in already-passing positions and depths
+3. Implement, run `make test`, run `make perft` (or `make perft-cert` for anything touching movegen or `Position`) — verify no regression in already-passing positions and depths
 4. Open a PR describing what the milestone adds and what changes in the perft output
 
 Coding conventions: no comments that restate what code obviously does; keep milestones scoped to one concern per commit; every non-trivial function carries at least one invariant assertion; do not weaken existing assertions to silence a spurious failure — investigate the position.

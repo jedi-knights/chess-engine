@@ -5,11 +5,12 @@ A C++20 chess engine (bitboard movegen + UCI). Author: single dev, hobby project
 ## Build & test
 
 ```
-make          # release build (-O3 -march=native)         → ./engine
-make debug    # -O0 -g + ASan/UBSan                        → ./engine
-make test     # compile + run doctest suite under ASan     → ./tests/run
-make perft    # ./engine perft 5 (correctness gate)
-make run      # ./engine  (UCI stdin loop)
+make            # release build (-O3 -march=native)         → ./engine
+make debug      # -O0 -g + ASan/UBSan                        → ./engine
+make test       # compile + run doctest suite under ASan     → ./tests/run
+make perft      # ./engine perft 5 (correctness gate)
+make perft-cert # ./engine perft 6 (~8B nodes, ~10 min — offline certification)
+make run        # ./engine  (UCI stdin loop)
 make clean
 ```
 
@@ -22,16 +23,27 @@ src/                engine sources
   types.h           Bitboard/Move/Piece/Square + encoding helpers
   bitboard.[h|cpp]  popcount, lsb, pretty
   attacks.[h|cpp]   precomputed leaper attack tables (knight/king/pawn)
-  position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo
-  movegen.[h|cpp]   generate_moves (legal moves) + in_check helper
+  position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo; incremental
+                    Zobrist + PSQ accumulators; repetition-key stack
+  movegen.[h|cpp]   generate_moves (legal moves) with pin-aware + enemy-attack
+                    shortcuts + in_check helper
   perft.[h|cpp]     perft driver + 6-position standard suite
   magic.[h|cpp]     magic bitboards — init-time search + O(1) slider attacks
-  zobrist.[h|cpp]   Zobrist keys + init + full-recompute reference
+  zobrist.[h|cpp]   Zobrist keys + init + full-recompute reference; ep is
+                    hashed only when the capture is pseudo-legal
   tt.[h|cpp]        transposition table (fixed-size direct-mapped, always-replace)
-  eval.[h|cpp]      static material evaluation (side-to-move perspective)
-  search.[h|cpp]    iterative-deepening negamax + alpha-beta + qsearch + MVV-LVA + TT
+  eval.[h|cpp]      material + PST + tapered eval + mobility + passed pawns
+                    + bishop pair (side-to-move perspective, incremental PSQ)
+  search.[h|cpp]    iterative-deepening negamax with alpha-beta, TT, qsearch,
+                    SEE-scored captures/promotions, PVS + null-window LMR,
+                    null-move pruning, check extensions, reverse futility +
+                    razoring, killers + capped history, aspiration windows,
+                    repetition + 50-move draw detection, TT-walked PV
   notation.[h|cpp]  UCI move ↔ Move (move_to_uci, parse_uci_move)
-  uci.[h|cpp]       UCI protocol loop; time management for wtime/btime
+  uci.[h|cpp]       UCI protocol loop on a background std::thread; per-iter
+                    info lines with full PV + nps + time; clock time
+                    management for wtime/btime; info string on mid-search
+                    position command
   main.cpp          entry (dispatches `perft` subcommand or falls into UCI)
 tests/              doctest suite; one file per src unit under test
 third_party/
@@ -48,7 +60,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 4. ✅ Pawn moves (pushes, double, captures, ep, promotions incl. underpromotion + capture-promotion)
 5. ✅ Sliding pieces — bishop, rook, queen (naive per-step rays; magic bitboards deferred)
 6. ✅ Castling (rights + emptiness + king start/transit/land squares not attacked)
-7. ✅ Legality filter — make/unmake round-trip + `is_square_attacked` on own king. **All 6 standard perft positions match through depth 4** (~10.7M node checks) — move generation is provably correct.
+7. ✅ Legality filter — make/unmake round-trip + `is_square_attacked` on own king. **All 6 standard perft positions match through depth 5** (~200M node checks); `make perft-cert` extends to depth 6 (~8B nodes) as an offline gate — move generation is provably correct.
 8. ✅ Search — material eval + negamax with alpha-beta. `cmd_go` parses `depth N`, emits UCI `info depth/score/nodes/pv` and `bestmove`. Default search depth 4. Distinguishes checkmate (`-MATE_SCORE + ply`, so shorter mates score higher) from stalemate (0).
 
 ## Post-roadmap next steps (each is an independent PR)
@@ -64,6 +76,17 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ Magic bitboards for slider attacks. `bishop_attacks(sq, occ)` / `rook_attacks(sq, occ)` are O(1) (3 loads + 1 multiply + 1 shift). Magic numbers discovered at init time via seeded random search (~0.25s startup for 128 magics — no hardcoded magic constant tables). Replaces the per-step gen_ray in slider move generation AND ray_hits_attacker in is_square_attacked. Perft 5 (~200M nodes total across all 6 standard positions) runs in ~16s = ~13M nodes/sec.
 - ✅ `go infinite` + `stop`. cmd_go runs on a background `std::thread`; for infinite mode it returns immediately, for depth/movetime/clock modes it joins synchronously (preserves the bestmove-before-return contract). `should_stop` polls both the movetime deadline and an atomic external-stop pointer (`SearchLimits::external_stop`) on the same 1024-node cadence. `cmd_stop` signals + joins. All writes to `out` go through a mutex-guarded `emit` helper so info lines don't interleave with concurrent isready replies. Search falls back to the first legal move if a stop lands before any move completes at d=1 — bestmove is always legal when any legal move exists.
 - ✅ UCI `position ... moves e2e4 e7e5 ...` — parse_uci_move infers MT_EN_PASSANT (pawn to ep_square) and MT_CASTLING (king ±2 files) from position state. Every move token is verified against the legal-move list before apply, so a malformed or illegal token stops processing rather than triggering a make_move assertion. Notation helpers live in `src/notation.[h|cpp]` with a full move_to_uci ↔ parse_uci_move round-trip test.
+- ✅ PVS + null-window LMR + check extensions. First move at each node gets full-window; subsequent moves get null-window probes (with a depth reduction for late quiet non-check moves) and only re-search on fail-high. In-check nodes extend depth by 1 so mate lines don't fall off the horizon.
+- ✅ Null-move pruning (R=3). At depth ≥ 3 non-check nodes with at least one non-pawn non-king piece (zugzwang guard) and a non-mate window, pass the turn and search at reduced depth; if the position still beats beta, prune. Board is unchanged — we just flip side_to_move, clear ep, and XOR the Zobrist deltas.
+- ✅ Repetition detection + 50-move rule. `Position::history[1024]` is a Zobrist-key stack pushed by make_move / popped by unmake_move; `is_repetition` scans back by 2 (same-side-to-move) stopping at halfmove_clock (irreversible-move boundary). Draw detection at any non-root node returns 0 on repetition or `halfmove_clock >= 100`.
+- ✅ Static Exchange Evaluation. Classical `gain[]` array with minimax backup, xray attackers via magic bitboards. Captures and promotions are ordered by SEE (winning above killers, losing below killers but above quiets). Qsearch skips losing captures. Non-capture promotions go through SEE too so a queen promo that gets recaptured is correctly ordered as a losing move.
+- ✅ Mobility + passed pawn scoring. Piece-type-weighted count of attack squares (safe mobility — excludes enemy pawn attacks), plus per-rank passed-pawn bonuses in separate MG/EG tables. Passed-pawn masks precomputed at init via `eval::init()`.
+- ✅ Bishop pair bonus. +30 MG / +50 EG when a side has 2+ bishops — the classical bonus for covering both color complexes.
+- ✅ Reverse futility (aka static null pruning) + razoring + root PVS. At non-check nodes with non-mate windows: if `eval - 80·depth >= beta` at depth ≤ 6, prune; if `eval + 200 <= alpha` at depth ≤ 2, drop to qsearch. `search_root` also PVS's — later root moves get a null-window probe first.
+- ✅ Conditional EP hashing. `zobrist::EP_FILE` is XOR'd only when a pawn of the side to move actually attacks the ep square. Fixes a hole where a "phantom" ep flag (double-push landing next to no enemy pawn) hashed differently from the same position without the flag, causing false-negative repetition detection.
+- ✅ Precomputed enemy attacks for king-move legality. `movegen::attacks_by` computes the full enemy-attack bitboard once per node (with own king removed from occupancy so sliders see through); non-capture king moves check legality with one AND instead of make/unmake+is_square_attacked. Captures + castling still fall back to full is_legal.
+- ✅ Full PV extraction. After each iteration, `build_pv` walks the TT from the post-bestmove position (bounded by depth, cycle-guarded, verified against generate_moves at each hop) and stores the line in `SearchResult::pv`. UCI info lines now emit the full PV plus `nps` and `time`.
+- ✅ Cmd_position mid-search warning. Sending `position` during an active `go infinite` without a preceding `stop` used to silently cancel the search; now emits an `info string` first so the GUI bug is visible.
 
 ## Search / eval performance stack
 
@@ -82,6 +105,8 @@ Startpos depth 8 (release, -O3 -march=native), each row adds on top of the previ
 
 Total: **3× search speedup, ~7× node reduction** on the depth-8 startpos benchmark. The node collapse comes almost entirely from LMR — reducing depth on late quiet moves prunes huge subtrees. Later phases (incremental eval, pin-aware) show as neutral on this benchmark because LMR + TT already dominated the runtime; both pay off on other workloads (pure perft shows ~26 % gain from pin-aware alone; eval gains from incremental will compound when more terms are added).
 
+**Grill round 2 additions** (post-milestone-8 stack above → after PVS + null-move + SEE + reverse futility + razoring + root PVS + king-move enemy-attack shortcut): startpos depth 8 drops from 198,183 nodes to **~54,700 nodes** — another ~3.6× cut on top of the earlier work. Depth 10 completes in ~27 ms / ~301k nodes with a full 10-ply PV.
+
 Perft 5 (~200 M nodes across the 6 standard positions): 16.5 s → 12.2 s = ~26 % faster on pure movegen throughput (~16 M nodes/sec).
 
 Do not skip a milestone. Perft numbers stay artificially low until every piece type generates, but each milestone's *round-trip* invariants (see `tests/test_position.cpp`) must hold before advancing.
@@ -93,12 +118,18 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
 - **One test file per src unit under test**, mirroring `src/`:
     - `tests/test_bitboard.cpp` ↔ `src/bitboard.[h|cpp]`
     - `tests/test_attacks.cpp`  ↔ `src/attacks.[h|cpp]`
-    - `tests/test_position.cpp` ↔ `src/position.[h|cpp]` (FEN + make/unmake forward-correctness only)
+    - `tests/test_magic.cpp`    ↔ `src/magic.[h|cpp]`
+    - `tests/test_position.cpp` ↔ `src/position.[h|cpp]` (FEN + make/unmake forward-correctness + repetition)
     - `tests/test_movegen.cpp`  ↔ `src/movegen.[h|cpp]` (generator shape + movegen-driven make/unmake walks)
     - `tests/test_perft.cpp`    ↔ `src/perft.[h|cpp]`
+    - `tests/test_zobrist.cpp`  ↔ `src/zobrist.[h|cpp]` (key round-trips + phantom-ep-hash regression)
+    - `tests/test_tt.cpp`       ↔ `src/tt.[h|cpp]`
+    - `tests/test_eval.cpp`     ↔ `src/eval.[h|cpp]` (material + PST + mobility + passed pawn + bishop pair)
+    - `tests/test_search.cpp`   ↔ `src/search.[h|cpp]` (negamax + qsearch + TT + SEE-promo regression)
+    - `tests/test_notation.cpp` ↔ `src/notation.[h|cpp]` (UCI move round-trip)
     - `tests/test_uci.cpp`      ↔ `src/uci.[h|cpp]` (protocol via stringstream — `uci_loop` takes `std::istream&/std::ostream&` for exactly this reason; do not reintroduce `std::cin`/`std::cout` inside the loop)
-  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`.
-- `tests/test_main.cpp` uses `DOCTEST_CONFIG_IMPLEMENT` and provides `main()` — this is the single place where `init_attacks()` is called so per-TU static-init hacks are unnecessary.
+  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`. Current status: 144 test cases / 270k assertions passing under ASan + UBSan.
+- `tests/test_main.cpp` uses `DOCTEST_CONFIG_IMPLEMENT` and provides `main()` — this is the single place where `init_attacks()`, `init_magic()`, `zobrist::init()`, and `eval::init()` are called, so per-TU static-init hacks are unnecessary.
 - Tests link the whole `src/` tree (except `main.cpp`) — see Makefile `$(TEST_SRCS)`.
 - Do not mock `Position` internals. Verify through `to_fen()` / public accessors.
 
@@ -118,10 +149,11 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
 
 ## Non-goals (for now)
 
-- Zobrist hashing / transposition table
-- Move ordering, killers, history heuristics
-- Time management
 - Opening book / endgame tablebases
-- Multi-threading
+- Multi-threading (Lazy SMP or similar — search stays single-threaded)
+- Pondering (`go ponder`)
+- MultiPV output
+- NNUE / any learned eval
 
-These belong after milestone 8. Do not add them speculatively.
+Do not add these speculatively — they each add substantial surface area
+and only pay off once the underlying search + eval is much stronger.
