@@ -61,6 +61,26 @@ TEST_CASE("side_to_move flip changes the key predictably") {
     CHECK((wpos.key ^ bpos.key) == zobrist::SIDE);
 }
 
+TEST_CASE("phantom ep flag doesn't affect the key when no capture is available") {
+    // Same placement, but position A has ep_square set to a square with
+    // no black pawn adjacent to capture, and position B has no ep flag.
+    // Under the pseudo-legal ep-hashing rule these must hash identically —
+    // otherwise repetition detection and TT would treat them as distinct.
+    Position phantom_ep, no_ep;
+    REQUIRE(phantom_ep.set_from_fen("4k3/8/8/8/4P3/8/8/4K3 b - e3 0 1"));
+    REQUIRE(no_ep     .set_from_fen("4k3/8/8/8/4P3/8/8/4K3 b -  -  0 1"));
+    CHECK(phantom_ep.key == no_ep.key);
+}
+
+TEST_CASE("real ep flag DOES affect the key when a capture is available") {
+    // Adjacent black pawn can actually capture ep on e3, so the ep flag
+    // is real and must be reflected in the key.
+    Position real_ep, no_ep;
+    REQUIRE(real_ep.set_from_fen("4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1"));
+    REQUIRE(no_ep  .set_from_fen("4k3/8/8/8/3pP3/8/8/4K3 b -  -  0 1"));
+    CHECK(real_ep.key != no_ep.key);
+}
+
 TEST_CASE("transpositions produce the same key") {
     // 1.Nf3 Nc6 2.Nc3 Nf6 and 1.Nc3 Nc6 2.Nf3 Nf6 reach the same board
     // via different move orders — Zobrist keys must match.
