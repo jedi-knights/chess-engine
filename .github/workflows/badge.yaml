@@ -30,6 +30,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # PAT with bypass on the main-branch ruleset. The default
+          # GITHUB_TOKEN can't push to main here because the ruleset
+          # requires "changes via PR" and doesn't list Actions as a
+          # bypass actor. Personal PAT persists in git's credential
+          # helper so the later `git push` in "Commit badge" uses it.
+          token: ${{ secrets.GH_TOKEN }}
           ref: main
 
       - name: Install toolchain + coverage tools
