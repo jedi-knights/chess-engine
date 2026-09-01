@@ -401,6 +401,34 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return score_from_tt(tt_score, ply);
     }
 
+    // Static-eval-based pruning at non-check nodes with non-mate windows.
+    // We compute evaluate() once and use it for both reverse futility and
+    // razoring — they hit opposite ends of the window, so both can apply.
+    //
+    //   Reverse futility (aka static null pruning): if we're ALREADY well
+    //   above beta after subtracting a generous margin-per-ply, giving
+    //   the opponent even a big move can't bring us below beta — prune.
+    //
+    //   Razoring: if we're WAY below alpha at very shallow depth, hand
+    //   off to qsearch and if even qsearch (which sees captures) can't
+    //   pull us back to alpha, return that as an upper bound.
+    if (!node_in_check
+        && std::abs(beta)  < MATE_SCORE - 1000
+        && std::abs(alpha) < MATE_SCORE - 1000) {
+        int se = evaluate(pos);
+
+        constexpr int RFP_MARGIN   = 80;    // cp per depth ply
+        constexpr int RAZOR_MARGIN = 200;   // cp
+
+        if (depth <= 6 && se - RFP_MARGIN * depth >= beta) {
+            return se;
+        }
+        if (depth <= 2 && se + RAZOR_MARGIN <= alpha) {
+            int qs = qsearch(pos, alpha, beta, ply, ctx);
+            if (qs <= alpha) return qs;
+        }
+    }
+
     // Null-move pruning: at non-PV interior nodes with sufficient
     // material, we let the opponent play two moves in a row (i.e., pass
     // our turn) and search at reduced depth. If the position is STILL
@@ -567,7 +595,23 @@ bool search_root(Position& pos, int depth,
         Move m = moves[i];
         UndoInfo u;
         pos.make_move(m, u);
-        int score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, ctx);
+        // Root PVS: the first move (best guess from prior iteration's TT
+        // hint or move ordering) gets a full-window search to establish
+        // the PV. Later moves get a null-window probe first — if they
+        // don't beat alpha, no need to spend the full-window cost. Only
+        // re-search when the probe genuinely lands inside the aspiration
+        // window (score > alpha AND score < beta_root); a probe result
+        // >= beta_root is a fail-high that the aspiration wrapper will
+        // widen and re-search anyway.
+        int score;
+        if (i == 0) {
+            score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, ctx);
+        } else {
+            score = -negamax(pos, depth - 1, -alpha - 1, -alpha, 1, ctx);
+            if (score > alpha && score < beta_root) {
+                score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, ctx);
+            }
+        }
         pos.unmake_move(m, u);
         if (ctx.stopped) return false;
         if (score > best)  { best = score; best_move = m; }
