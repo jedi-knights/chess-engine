@@ -28,7 +28,7 @@ endif
 COVDIR   := coverage
 COV_BIN  := $(COVDIR)/tests
 
-.PHONY: all clean debug perft run test lint coverage
+.PHONY: all clean debug perft perft-cert run test lint coverage
 
 all: $(TARGET)
 
@@ -44,6 +44,14 @@ debug: clean $(TARGET)
 
 perft: $(TARGET)
 	./$(TARGET) perft 5
+
+# Full six-position depth-6 perft (~8 billion nodes). Movegen correctness
+# certification — expensive (~10 minutes on -O3 -march=native) so it's
+# not in the standard test loop, but any change to movegen or Position
+# should pass this before shipping. Catches rare castling-through-check
+# and edge-case pin bugs that depth 5 doesn't exercise.
+perft-cert: $(TARGET)
+	./$(TARGET) perft 6
 
 run: $(TARGET)
 	./$(TARGET)
