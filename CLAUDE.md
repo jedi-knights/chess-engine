@@ -63,10 +63,26 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ Tapered eval — phase = 4·Q + 2·R + 1·B + 1·N per side (capped at 24 = starting non-pawn material). King PST interpolates linearly between MG (safety, favors castled positions) and EG (activity, favors center) by phase weight. In pure K+K endgames the engine now walks the king toward the center (Ka1-b2, Ke1-d2) instead of the corner. Other pieces still use a single table since MG/EG differences are small.
 - ✅ Magic bitboards for slider attacks. `bishop_attacks(sq, occ)` / `rook_attacks(sq, occ)` are O(1) (3 loads + 1 multiply + 1 shift). Magic numbers discovered at init time via seeded random search (~0.25s startup for 128 magics — no hardcoded magic constant tables). Replaces the per-step gen_ray in slider move generation AND ray_hits_attacker in is_square_attacked. Perft 5 (~200M nodes total across all 6 standard positions) runs in ~16s = ~13M nodes/sec.
 - ✅ `go infinite` + `stop`. cmd_go runs on a background `std::thread`; for infinite mode it returns immediately, for depth/movetime/clock modes it joins synchronously (preserves the bestmove-before-return contract). `should_stop` polls both the movetime deadline and an atomic external-stop pointer (`SearchLimits::external_stop`) on the same 1024-node cadence. `cmd_stop` signals + joins. All writes to `out` go through a mutex-guarded `emit` helper so info lines don't interleave with concurrent isready replies. Search falls back to the first legal move if a stop lands before any move completes at d=1 — bestmove is always legal when any legal move exists.
-- `go infinite` + `stop` (needs an async cancellation signal, not just a deadline)
-- Magic bitboards for slider attacks
-- Piece-square tables in eval
 - ✅ UCI `position ... moves e2e4 e7e5 ...` — parse_uci_move infers MT_EN_PASSANT (pawn to ep_square) and MT_CASTLING (king ±2 files) from position state. Every move token is verified against the legal-move list before apply, so a malformed or illegal token stops processing rather than triggering a make_move assertion. Notation helpers live in `src/notation.[h|cpp]` with a full move_to_uci ↔ parse_uci_move round-trip test.
+
+## Search / eval performance stack
+
+Startpos depth 8 (release, -O3 -march=native), each row adds on top of the previous:
+
+| Layer                           | Time   | Nodes      |
+|---------------------------------|-------:|-----------:|
+| Baseline (post-milestone-8)     | 0.85 s | 1,424,033  |
+| MoveList (stack, no malloc)     | 0.78 s | 1,424,033  |
+| Compute-once + lazy pick sort   | 0.58 s | 1,326,211  |
+| Captures-only qsearch generator | 0.43 s | 1,415,621  |
+| Aspiration windows (±75 cp)     | 0.41 s | 1,356,981  |
+| Late Move Reductions (LMR)      | 0.28 s |   198,183  |
+| Incremental eval (psq_mg/eg)    | 0.28 s |   198,183  |
+| Pin-aware legality shortcut     | 0.28 s |   198,183  |
+
+Total: **3× search speedup, ~7× node reduction** on the depth-8 startpos benchmark. The node collapse comes almost entirely from LMR — reducing depth on late quiet moves prunes huge subtrees. Later phases (incremental eval, pin-aware) show as neutral on this benchmark because LMR + TT already dominated the runtime; both pay off on other workloads (pure perft shows ~26 % gain from pin-aware alone; eval gains from incremental will compound when more terms are added).
+
+Perft 5 (~200 M nodes across the 6 standard positions): 16.5 s → 12.2 s = ~26 % faster on pure movegen throughput (~16 M nodes/sec).
 
 Do not skip a milestone. Perft numbers stay artificially low until every piece type generates, but each milestone's *round-trip* invariants (see `tests/test_position.cpp`) must hold before advancing.
 
