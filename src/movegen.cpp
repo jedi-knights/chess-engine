@@ -173,21 +173,80 @@ void generate_slider_moves(const Position& pos, MoveList& moves, bool captures_o
     }
 }
 
-// Legality filter: apply `m`, ask whether the mover's king is now attacked
-// by the opponent, unapply. Cheap in the current naive-ray movegen; magic
-// bitboards + pin/check awareness can bypass this for most moves later.
+// Full-power legality check: apply `m`, ask whether the mover's king is
+// attacked, unapply. Used for the "hard" cases where the fast shortcut
+// (see filter_illegal) can't rule the move in or out safely.
 bool is_legal(Position& pos, Move m) {
     const Color us = pos.side_to_move;
     UndoInfo u;
     pos.make_move(m, u);
-    // Kings can be temporarily absent in contrived perft positions (see the
-    // "Position 4 has no white king" note in CLAUDE.md) — treat as legal so
-    // the generator still returns something for those artificial cases.
     Bitboard king_bb = pos.pieces[us][KING];
     bool safe = (king_bb == 0) ||
                 !is_square_attacked(pos, lsb(king_bb), pos.side_to_move);
     pos.unmake_move(m, u);
     return safe;
+}
+
+// Squares strictly between two collinear squares (same rank, file, or
+// diagonal). Returns 0 if the two squares aren't on any shared ray.
+// Used to detect pinning: exactly one blocker between king and a
+// potential pinner means that blocker is pinned.
+Bitboard squares_between(Square a, Square b) {
+    int fa = file_of(a), ra = rank_of(a);
+    int fb = file_of(b), rb = rank_of(b);
+    int df_raw = fb - fa;
+    int dr_raw = rb - ra;
+    // Not on a shared ray: not same file, not same rank, not on a diagonal
+    // (|df| != |dr|). Return 0 harmlessly.
+    if (df_raw == 0 && dr_raw == 0) return 0;
+    if (df_raw != 0 && dr_raw != 0 &&
+        df_raw != dr_raw && df_raw != -dr_raw) return 0;
+    int df = (df_raw > 0) - (df_raw < 0);
+    int dr = (dr_raw > 0) - (dr_raw < 0);
+    Bitboard result = 0;
+    int f = fa + df, r = ra + dr;
+    while (f != fb || r != rb) {
+        result |= square_bb(make_square(File(f), Rank(r)));
+        f += df; r += dr;
+    }
+    return result;
+}
+
+// Bitboard of side-to-move's pieces that are pinned to their king by
+// enemy sliders. A piece is pinned when it is the ONLY blocker on a
+// king-to-slider ray — moving it off that ray would expose the king.
+//
+// Fast xray trick: cast slider attacks from the king with own-piece
+// blockers REMOVED from the occupancy; enemy sliders reachable via
+// that xray are the potential pinners. Then for each, check that
+// exactly one of our pieces sits between them and the king.
+Bitboard compute_pinned(const Position& pos) {
+    const Color    us      = pos.side_to_move;
+    const Bitboard king_bb = pos.pieces[us][KING];
+    if (!king_bb) return 0;
+    const Square   king_sq  = lsb(king_bb);
+    const Color    them     = Color(us ^ 1);
+    const Bitboard our      = pos.colors[us];
+    const Bitboard occ      = pos.occupied;
+    const Bitboard occ_xray = occ & ~our;
+
+    const Bitboard enemy_bq = pos.pieces[them][BISHOP] | pos.pieces[them][QUEEN];
+    const Bitboard enemy_rq = pos.pieces[them][ROOK]   | pos.pieces[them][QUEEN];
+    Bitboard pinners =
+        (bishop_attacks(king_sq, occ_xray) & enemy_bq) |
+        (rook_attacks  (king_sq, occ_xray) & enemy_rq);
+
+    Bitboard pinned = 0;
+    while (pinners) {
+        Square   sq       = pop_lsb(pinners);
+        Bitboard between  = squares_between(king_sq, sq);
+        Bitboard blockers = between & occ;
+        // Exactly one blocker AND it's ours → pinned.
+        if (popcount(blockers) == 1 && (blockers & our)) {
+            pinned |= blockers;
+        }
+    }
+    return pinned;
 }
 
 }  // namespace
@@ -230,10 +289,36 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
     generate_slider_moves(pos, moves, captures_only);
     if (!captures_only) generate_castling(pos, moves);
 
-    // Post-filter: drop any pseudo-legal move that leaves our king in check.
+    // Legality filter with a fast shortcut. The classical "make each move,
+    // check if king is attacked, unmake" is safe but pays 100+ ns per move
+    // for the make/unmake+attack scan. We only need it for the moves that
+    // could actually leave our king in check:
+    //
+    //   - We're already in check   → any response might fail; verify all.
+    //   - It's a king move          → destination might be attacked.
+    //   - The piece is pinned       → moving off the pin line exposes king.
+    //   - En passant                → weird horizontal-pin cases (rare).
+    //
+    // Everything else is guaranteed legal by construction — a non-pinned
+    // non-king move by definition can't expose the king when we're not
+    // already in check. That covers the vast majority of moves at any
+    // typical position and skips the make/unmake round-trip entirely.
+    const bool in_check_now = in_check(pos);
+    const Bitboard pinned = compute_pinned(pos);
+    const Bitboard king_bb = pos.pieces[pos.side_to_move][KING];
+    const Square king_sq = king_bb ? lsb(king_bb) : NO_SQUARE;
+
     moves.erase(
         std::remove_if(moves.begin(), moves.end(),
-                       [&](Move m) { return !is_legal(pos, m); }),
+                       [&](Move m) {
+                           Square from = move_from(m);
+                           bool needs_full_check =
+                               in_check_now                            ||
+                               from == king_sq                         ||
+                               move_type(m) == MT_EN_PASSANT           ||
+                               (pinned & square_bb(from));
+                           return needs_full_check && !is_legal(pos, m);
+                       }),
         moves.end());
 }
 
