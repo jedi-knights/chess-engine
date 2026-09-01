@@ -91,7 +91,7 @@ uciok
 quit
 ```
 
-Any UCI-compatible GUI (Arena, Cute Chess, Banksia, ChessBase) can drive it as an engine binary. Point the GUI at the compiled `./engine`.
+Any UCI-compatible GUI can drive it as an engine binary. Point the GUI at the compiled `./engine`. Common choices: [Arena](http://www.playwitharena.de/), [Cute Chess](https://cutechess.com/), [Banksia GUI](https://banksiagui.com/), [ChessBase](https://en.chessbase.com/).
 
 The `go` command runs iterative-deepening alpha-beta search. Supported forms:
 
