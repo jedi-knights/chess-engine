@@ -8,6 +8,7 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 ![Status](https://img.shields.io/badge/status-early--development-orange.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Table of Contents
 
@@ -208,7 +209,7 @@ Coding conventions: no comments that restate what code obviously does; keep mile
 
 ## License
 
-Not yet chosen. A `LICENSE` file will land before the first tagged release.
+MIT — see [LICENSE](LICENSE).
 
 ## References
 
