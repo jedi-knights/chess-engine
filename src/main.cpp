@@ -1,4 +1,5 @@
 #include "attacks.h"
+#include "eval.h"
 #include "magic.h"
 #include "perft.h"
 #include "uci.h"
@@ -12,6 +13,7 @@ int main(int argc, char** argv) {
     init_attacks();
     init_magic();
     zobrist::init();
+    eval::init();
 
     if (argc >= 2 && std::strcmp(argv[1], "perft") == 0) {
         int depth = (argc >= 3) ? std::atoi(argv[2]) : 4;
