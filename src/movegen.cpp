@@ -20,7 +20,7 @@ constexpr Bitboard RANK_8_BB = 0xFF00000000000000ULL;
 // destination sits on the promotion rank.
 inline void emit_pawn_move(Square from, Square to, Bitboard promo_rank,
                            MoveType mt, MoveList& moves) {
-    if (square_bb(to) & promo_rank) {
+    if ((square_bb(to) & promo_rank) != 0U) {
         moves.push_back(make_move(from, to, MT_PROMOTION, QUEEN));
         moves.push_back(make_move(from, to, MT_PROMOTION, ROOK));
         moves.push_back(make_move(from, to, MT_PROMOTION, BISHOP));
@@ -33,6 +33,7 @@ inline void emit_pawn_move(Square from, Square to, Bitboard promo_rank,
 // captures_only=true skips pushes/double-pushes but still emits captures,
 // en passant, AND non-capture promotions (they're forcing tactical moves
 // that a qsearch shouldn't ignore).
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — pawn movegen fuses pushes, double-pushes, captures, en-passant, and 4-piece promotion expansion; splitting doubles the file size for no runtime benefit.
 void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_only) {
     const Color    us    = pos.side_to_move;
     const Bitboard empty = ~pos.occupied;
@@ -52,23 +53,25 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
             dbl    = 0;
         }
 
-        while (single) { Square to = pop_lsb(single);
+        while (single != 0U) { Square to = pop_lsb(single);
                          emit_pawn_move(Square(to - 8),  to, RANK_8_BB, MT_NORMAL, moves); }
-        while (dbl)    { Square to = pop_lsb(dbl);
+        while (dbl != 0U)    { Square to = pop_lsb(dbl);
                          moves.push_back(make_move(Square(to - 16), to)); }
-        while (cap_nw) { Square to = pop_lsb(cap_nw);
+        while (cap_nw != 0U) { Square to = pop_lsb(cap_nw);
                          emit_pawn_move(Square(to - 7),  to, RANK_8_BB, MT_NORMAL, moves); }
-        while (cap_ne) { Square to = pop_lsb(cap_ne);
+        while (cap_ne != 0U) { Square to = pop_lsb(cap_ne);
                          emit_pawn_move(Square(to - 9),  to, RANK_8_BB, MT_NORMAL, moves); }
 
         if (pos.ep_square != NO_SQUARE) {
             Bitboard ep_bb = square_bb(pos.ep_square);
-            if (((pawns & ~FILE_A_BB) << 7) & ep_bb)
+            if ((((pawns & ~FILE_A_BB) << 7) & ep_bb) != 0U) {
                 moves.push_back(make_move(Square(int(pos.ep_square) - 7),
                                           pos.ep_square, MT_EN_PASSANT));
-            if (((pawns & ~FILE_H_BB) << 9) & ep_bb)
+            }
+            if ((((pawns & ~FILE_H_BB) << 9) & ep_bb) != 0U) {
                 moves.push_back(make_move(Square(int(pos.ep_square) - 9),
                                           pos.ep_square, MT_EN_PASSANT));
+            }
         }
     } else {
         Bitboard single = (pawns >> 8) & empty;
@@ -81,23 +84,25 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
             dbl    = 0;
         }
 
-        while (single) { Square to = pop_lsb(single);
+        while (single != 0U) { Square to = pop_lsb(single);
                          emit_pawn_move(Square(to + 8),  to, RANK_1_BB, MT_NORMAL, moves); }
-        while (dbl)    { Square to = pop_lsb(dbl);
+        while (dbl != 0U)    { Square to = pop_lsb(dbl);
                          moves.push_back(make_move(Square(to + 16), to)); }
-        while (cap_se) { Square to = pop_lsb(cap_se);
+        while (cap_se != 0U) { Square to = pop_lsb(cap_se);
                          emit_pawn_move(Square(to + 7),  to, RANK_1_BB, MT_NORMAL, moves); }
-        while (cap_sw) { Square to = pop_lsb(cap_sw);
+        while (cap_sw != 0U) { Square to = pop_lsb(cap_sw);
                          emit_pawn_move(Square(to + 9),  to, RANK_1_BB, MT_NORMAL, moves); }
 
         if (pos.ep_square != NO_SQUARE) {
             Bitboard ep_bb = square_bb(pos.ep_square);
-            if (((pawns & ~FILE_H_BB) >> 7) & ep_bb)
+            if ((((pawns & ~FILE_H_BB) >> 7) & ep_bb) != 0U) {
                 moves.push_back(make_move(Square(int(pos.ep_square) + 7),
                                           pos.ep_square, MT_EN_PASSANT));
-            if (((pawns & ~FILE_A_BB) >> 9) & ep_bb)
+            }
+            if ((((pawns & ~FILE_A_BB) >> 9) & ep_bb) != 0U) {
                 moves.push_back(make_move(Square(int(pos.ep_square) + 9),
                                           pos.ep_square, MT_EN_PASSANT));
+            }
         }
     }
 }
@@ -116,13 +121,21 @@ Bitboard attacks_by(const Position& pos, Color by, Bitboard occ) {
         atk |= ((pawns & ~FILE_H_BB) >> 7) | ((pawns & ~FILE_A_BB) >> 9);
     }
     Bitboard b = pos.pieces[by][KNIGHT];
-    while (b) atk |= KNIGHT_ATTACKS[pop_lsb(b)];
+    while (b != 0U) {
+        atk |= KNIGHT_ATTACKS[pop_lsb(b)];
+    }
     Bitboard bq = pos.pieces[by][BISHOP] | pos.pieces[by][QUEEN];
-    while (bq) atk |= bishop_attacks(pop_lsb(bq), occ);
+    while (bq != 0U) {
+        atk |= bishop_attacks(pop_lsb(bq), occ);
+    }
     Bitboard rq = pos.pieces[by][ROOK]   | pos.pieces[by][QUEEN];
-    while (rq) atk |= rook_attacks  (pop_lsb(rq), occ);
+    while (rq != 0U) {
+        atk |= rook_attacks  (pop_lsb(rq), occ);
+    }
     Bitboard k = pos.pieces[by][KING];
-    while (k) atk |= KING_ATTACKS[pop_lsb(k)];
+    while (k != 0U) {
+        atk |= KING_ATTACKS[pop_lsb(k)];
+    }
     return atk;
 }
 
@@ -132,15 +145,25 @@ Bitboard attacks_by(const Position& pos, Color by, Bitboard occ) {
 // pawn direction inverted, since pawns only attack "forward". Sliders
 // use magic bitboards for O(1) attack-set lookup.
 bool is_square_attacked(const Position& pos, Square sq, Color by) {
-    if (PAWN_ATTACKS[Color(by ^ 1)][sq] & pos.pieces[by][PAWN])   return true;
-    if (KNIGHT_ATTACKS[sq]              & pos.pieces[by][KNIGHT]) return true;
-    if (KING_ATTACKS[sq]                & pos.pieces[by][KING])   return true;
+    if ((PAWN_ATTACKS[Color(by ^ 1)][sq] & pos.pieces[by][PAWN])   != 0U) {
+        return true;
+    }
+    if ((KNIGHT_ATTACKS[sq]              & pos.pieces[by][KNIGHT]) != 0U) {
+        return true;
+    }
+    if ((KING_ATTACKS[sq]                & pos.pieces[by][KING])   != 0U) {
+        return true;
+    }
 
     const Bitboard occ = pos.occupied;
     const Bitboard bq  = pos.pieces[by][BISHOP] | pos.pieces[by][QUEEN];
     const Bitboard rq  = pos.pieces[by][ROOK]   | pos.pieces[by][QUEEN];
-    if (bishop_attacks(sq, occ) & bq) return true;
-    if (rook_attacks  (sq, occ) & rq) return true;
+    if ((bishop_attacks(sq, occ) & bq) != 0U) {
+        return true;
+    }
+    if ((rook_attacks  (sq, occ) & rq) != 0U) {
+        return true;
+    }
     return false;
 }
 
@@ -156,11 +179,21 @@ void generate_castling(const Position& pos, MoveList& moves) {
     // pass through it.
     auto try_castle = [&](int right, Square king_from, Square king_to,
                           Bitboard between_empty, Square transit) {
-        if (!(pos.castling & right))                    return;
-        if (occ & between_empty)                        return;
-        if (is_square_attacked(pos, king_from, them))   return;
-        if (is_square_attacked(pos, transit,   them))   return;
-        if (is_square_attacked(pos, king_to,   them))   return;
+        if ((pos.castling & right) == 0)                {
+            return;
+        }
+        if ((occ & between_empty) != 0U)                {
+            return;
+        }
+        if (is_square_attacked(pos, king_from, them))   {
+            return;
+        }
+        if (is_square_attacked(pos, transit,   them))   {
+            return;
+        }
+        if (is_square_attacked(pos, king_to,   them))   {
+            return;
+        }
         moves.push_back(make_move(king_from, king_to, MT_CASTLING));
     };
 
@@ -183,17 +216,21 @@ void generate_slider_moves(const Position& pos, MoveList& moves, bool captures_o
     const Bitboard target_mask = captures_only ? enemy : ~our;
 
     Bitboard diag = pos.pieces[us][BISHOP] | pos.pieces[us][QUEEN];
-    while (diag) {
+    while (diag != 0U) {
         Square from = pop_lsb(diag);
         Bitboard targets = bishop_attacks(from, occ) & target_mask;
-        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
+        while (targets != 0U) {
+            moves.push_back(make_move(from, pop_lsb(targets)));
+        }
     }
 
     Bitboard orth = pos.pieces[us][ROOK] | pos.pieces[us][QUEEN];
-    while (orth) {
+    while (orth != 0U) {
         Square from = pop_lsb(orth);
         Bitboard targets = rook_attacks(from, occ) & target_mask;
-        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
+        while (targets != 0U) {
+            moves.push_back(make_move(from, pop_lsb(targets)));
+        }
     }
 }
 
@@ -216,19 +253,26 @@ bool is_legal(Position& pos, Move m) {
 // Used to detect pinning: exactly one blocker between king and a
 // potential pinner means that blocker is pinned.
 Bitboard squares_between(Square a, Square b) {
-    int fa = file_of(a), ra = rank_of(a);
-    int fb = file_of(b), rb = rank_of(b);
+    int fa = file_of(a);
+    int ra = rank_of(a);
+    int fb = file_of(b);
+    int rb = rank_of(b);
     int df_raw = fb - fa;
     int dr_raw = rb - ra;
     // Not on a shared ray: not same file, not same rank, not on a diagonal
     // (|df| != |dr|). Return 0 harmlessly.
-    if (df_raw == 0 && dr_raw == 0) return 0;
+    if (df_raw == 0 && dr_raw == 0) {
+        return 0;
+    }
     if (df_raw != 0 && dr_raw != 0 &&
-        df_raw != dr_raw && df_raw != -dr_raw) return 0;
-    int df = (df_raw > 0) - (df_raw < 0);
-    int dr = (dr_raw > 0) - (dr_raw < 0);
+        df_raw != dr_raw && df_raw != -dr_raw) {
+        return 0;
+    }
+    int df = static_cast<int>(df_raw > 0) - static_cast<int>(df_raw < 0);
+    int dr = static_cast<int>(dr_raw > 0) - static_cast<int>(dr_raw < 0);
     Bitboard result = 0;
-    int f = fa + df, r = ra + dr;
+    int f = fa + df;
+    int r = ra + dr;
     while (f != fb || r != rb) {
         result |= square_bb(make_square(File(f), Rank(r)));
         f += df; r += dr;
@@ -247,7 +291,9 @@ Bitboard squares_between(Square a, Square b) {
 Bitboard compute_pinned(const Position& pos) {
     const Color    us      = pos.side_to_move;
     const Bitboard king_bb = pos.pieces[us][KING];
-    if (!king_bb) return 0;
+    if (king_bb == 0U) {
+        return 0;
+    }
     const Square   king_sq  = lsb(king_bb);
     const Color    them     = Color(us ^ 1);
     const Bitboard our      = pos.colors[us];
@@ -261,12 +307,12 @@ Bitboard compute_pinned(const Position& pos) {
         (rook_attacks  (king_sq, occ_xray) & enemy_rq);
 
     Bitboard pinned = 0;
-    while (pinners) {
+    while (pinners != 0U) {
         Square   sq       = pop_lsb(pinners);
         Bitboard between  = squares_between(king_sq, sq);
         Bitboard blockers = between & occ;
         // Exactly one blocker AND it's ours → pinned.
-        if (popcount(blockers) == 1 && (blockers & our)) {
+        if (popcount(blockers) == 1 && ((blockers & our) != 0U)) {
             pinned |= blockers;
         }
     }
@@ -277,7 +323,9 @@ Bitboard compute_pinned(const Position& pos) {
 
 bool in_check(const Position& pos) {
     Bitboard king_bb = pos.pieces[pos.side_to_move][KING];
-    if (!king_bb) return false;   // artificial no-king test positions
+    if (king_bb == 0U) {
+        return false;   // artificial no-king test positions
+    }
     return is_square_attacked(pos, lsb(king_bb),
                               Color(pos.side_to_move ^ 1));
 }
@@ -294,24 +342,30 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
     const Bitboard target_mask = captures_only ? enemy : ~our_pieces;
 
     Bitboard knights = pos.pieces[us][KNIGHT];
-    while (knights) {
+    while (knights != 0U) {
         Square from = pop_lsb(knights);
         Bitboard targets = KNIGHT_ATTACKS[from] & target_mask;
-        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
+        while (targets != 0U) {
+            moves.push_back(make_move(from, pop_lsb(targets)));
+        }
     }
 
     // Loop, not `if`, so contrived test positions with 0 or 2+ kings don't
     // crash the generator.
     Bitboard kings = pos.pieces[us][KING];
-    while (kings) {
+    while (kings != 0U) {
         Square from = pop_lsb(kings);
         Bitboard targets = KING_ATTACKS[from] & target_mask;
-        while (targets) moves.push_back(make_move(from, pop_lsb(targets)));
+        while (targets != 0U) {
+            moves.push_back(make_move(from, pop_lsb(targets)));
+        }
     }
 
     generate_pawn_moves  (pos, moves, captures_only);
     generate_slider_moves(pos, moves, captures_only);
-    if (!captures_only) generate_castling(pos, moves);
+    if (!captures_only) {
+        generate_castling(pos, moves);
+    }
 
     // Legality filter with fast shortcuts. Classical make/unmake+attack
     // scan is ~100 ns per move; we only need it for moves that could
@@ -333,15 +387,17 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
     const bool     in_check_now = in_check(pos);
     const Bitboard pinned       = compute_pinned(pos);
     const Bitboard king_bb      = pos.pieces[pos.side_to_move][KING];
-    const Square   king_sq      = king_bb ? lsb(king_bb) : NO_SQUARE;
-    const Bitboard enemy_atk_no_king = king_bb
+    const Square   king_sq      = (king_bb != 0U) ? lsb(king_bb) : NO_SQUARE;
+    const Bitboard enemy_atk_no_king = (king_bb != 0U)
         ? attacks_by(pos, Color(us ^ 1), pos.occupied ^ king_bb)
         : 0;
 
     moves.erase(
         std::remove_if(moves.begin(), moves.end(),
                        [&](Move m) {
-                           if (move_type(m) == MT_CASTLING) return false;
+                           if (move_type(m) == MT_CASTLING) {
+                               return false;
+                           }
                            Square from = move_from(m);
                            Square to   = move_to(m);
                            if (from == king_sq && pos.board[to] == NO_PIECE) {
@@ -352,7 +408,7 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
                                in_check_now                            ||
                                from == king_sq                         ||
                                move_type(m) == MT_EN_PASSANT           ||
-                               (pinned & square_bb(from));
+                               ((pinned & square_bb(from)) != 0U);
                            return needs_full_check && !is_legal(pos, m);
                        }),
         moves.end());

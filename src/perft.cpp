@@ -4,7 +4,9 @@
 #include <ostream>
 
 uint64_t perft(Position& pos, int depth) {
-    if (depth == 0) return 1;
+    if (depth == 0) {
+        return 1;
+    }
     MoveList moves;
     generate_moves(pos, moves);
     uint64_t nodes = 0;
@@ -57,13 +59,17 @@ bool run_perft_suite(int max_depth, std::ostream& out) {
         out << "=== " << e.name << " ===\n" << e.fen << '\n';
         for (int d = 1; d <= max_depth && d < 7; ++d) {
             uint64_t expected = e.counts[d];
-            if (expected == 0) continue;
+            if (expected == 0) {
+                continue;
+            }
             uint64_t got  = perft(pos, d);
             const char* mark = (got == expected) ? "OK  " : "FAIL";
             out << "  [" << mark << "] depth " << d
                 << ": got " << got
                 << ", expected " << expected << '\n';
-            if (got != expected) all_ok = false;
+            if (got != expected) {
+                all_ok = false;
+            }
         }
     }
     return all_ok;

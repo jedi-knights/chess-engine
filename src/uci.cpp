@@ -78,18 +78,26 @@ void cmd_position(std::istringstream& is, Position& pos, std::ostream& out) {
     } else if (token == "fen") {
         std::string fen;
         while (is >> token && token != "moves") {
-            if (!fen.empty()) fen += ' ';
+            if (!fen.empty()) {
+                fen += ' ';
+            }
             fen += token;
         }
         pos.set_from_fen(fen);
     }
-    if (token != "moves") return;
+    if (token != "moves") {
+        return;
+    }
     while (is >> token) {
         Move m = parse_uci_move(pos, token);
-        if (m == NULL_MOVE) return;
+        if (m == NULL_MOVE) {
+            return;
+        }
         MoveList legal;
         generate_moves(pos, legal);
-        if (std::find(legal.begin(), legal.end(), m) == legal.end()) return;
+        if (std::find(legal.begin(), legal.end(), m) == legal.end()) {
+            return;
+        }
         UndoInfo u;
         pos.make_move(m, u);
     }
@@ -104,34 +112,46 @@ constexpr int DEFAULT_DEPTH = 4;
 // cap at a depth that would take well beyond any practical think-time.
 constexpr int MOVETIME_MAX_DEPTH = 64;
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — (remaining, increment, movestogo) mirrors the UCI wtime/winc/movestogo token order the parser feeds in.
 int compute_movetime(int remaining_ms, int increment_ms, int movestogo) {
     constexpr int SAFETY_BUFFER_MS = 100;
     int budget = remaining_ms - SAFETY_BUFFER_MS;
-    if (budget <= 0) return 1;
+    if (budget <= 0) {
+        return 1;
+    }
 
     int moves_left = (movestogo > 0) ? movestogo : 30;
     int base       = budget / (moves_left + 2);
     int inc        = (increment_ms * 3) / 4;
     int movetime   = base + inc;
     int hard_cap   = budget / 3;
-    if (movetime > hard_cap) movetime = hard_cap;
-    if (movetime < 5)        movetime = 5;
+    movetime = std::min(movetime, hard_cap);
+    movetime = std::max(movetime, 5);
     return movetime;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — UCI `go` parses N optional keyword-value pairs (depth, movetime, wtime/btime/winc/binc/movestogo, infinite) and dispatches to sync or async search; the shape follows the UCI spec, not our decomposition.
 void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
     // Cancel any prior search before starting a new one. Its bestmove
     // (if it managed to emit one before the cancel) has already gone out.
     wait_for_search();
 
     SearchLimits limits;
-    bool depth_set = false, movetime_set = false, infinite = false;
-    int  wtime = 0, btime = 0, winc = 0, binc = 0, movestogo = 0;
+    bool depth_set = false;
+    bool movetime_set = false;
+    bool infinite = false;
+    int  wtime = 0;
+    int  btime = 0;
+    int  winc = 0;
+    int  binc = 0;
+    int  movestogo = 0;
     bool clock_given = false;
 
     std::string token;
     auto next_int = [&](int& out_value) {
-        if (!(is >> token)) return false;
+        if (!(is >> token)) {
+            return false;
+        }
         try { out_value = std::stoi(token); return true; }
         catch (...) { return false; }
     };
@@ -139,8 +159,8 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
     while (is >> token) {
         if      (token == "depth")     { int v; if (next_int(v)) { limits.max_depth = v; depth_set = true; } }
         else if (token == "movetime")  { int v; if (next_int(v)) { limits.movetime_ms = v; movetime_set = true; } }
-        else if (token == "wtime")     { if (next_int(wtime)) clock_given = true; }
-        else if (token == "btime")     { if (next_int(btime)) clock_given = true; }
+        else if (token == "wtime")     { if (next_int(wtime)) { clock_given = true; } }
+        else if (token == "btime")     { if (next_int(btime)) { clock_given = true; } }
         else if (token == "winc")      { next_int(winc); }
         else if (token == "binc")      { next_int(binc); }
         else if (token == "movestogo") { next_int(movestogo); }
@@ -156,7 +176,9 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
     if (infinite) {
         // `infinite` disables all natural stop conditions — search runs
         // until `stop` fires the external cancellation.
-        if (!depth_set) limits.max_depth = MOVETIME_MAX_DEPTH;
+        if (!depth_set) {
+            limits.max_depth = MOVETIME_MAX_DEPTH;
+        }
         limits.movetime_ms = 0;
     } else if (!depth_set) {
         limits.max_depth = (limits.movetime_ms > 0) ? MOVETIME_MAX_DEPTH : DEFAULT_DEPTH;
@@ -172,7 +194,7 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
 
     auto search_start = std::chrono::steady_clock::now();
     g_search_thread = std::thread(
-        [pos_copy = std::move(pos_copy), limits, out_ptr, search_start]() mutable {
+        [pos_copy, limits, out_ptr, search_start]() mutable {
             SearchResult r = search_iterative(pos_copy, limits,
                 [&](const SearchResult& iter) {
                     auto now = std::chrono::steady_clock::now();
@@ -197,7 +219,9 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
                     if (iter.pv.empty()) {
                         line << ' ' << move_to_uci(iter.best_move);
                     } else {
-                        for (Move m : iter.pv) line << ' ' << move_to_uci(m);
+                        for (Move m : iter.pv) {
+                            line << ' ' << move_to_uci(m);
+                        }
                     }
                     line << "\n";
                     emit(*out_ptr, line.str());
@@ -233,17 +257,17 @@ void uci_loop(std::istream& in, std::ostream& out) {
         std::istringstream is(line);
         std::string cmd;
         is >> cmd;
-        if      (cmd == "uci")        cmd_uci(out);
-        else if (cmd == "isready")    cmd_isready(out);
+        if      (cmd == "uci")        { cmd_uci(out); }
+        else if (cmd == "isready")    { cmd_isready(out); }
         else if (cmd == "ucinewgame") { wait_for_search();
                                         pos.set_from_fen(STARTPOS_FEN);
                                         clear_transposition_table(); }
-        else if (cmd == "position")   cmd_position(is, pos, out);
-        else if (cmd == "go")         cmd_go(is, pos, out);
-        else if (cmd == "stop")       cmd_stop();
+        else if (cmd == "position")   { cmd_position(is, pos, out); }
+        else if (cmd == "go")         { cmd_go(is, pos, out); }
+        else if (cmd == "stop")       { cmd_stop(); }
         else if (cmd == "d")          { wait_for_search();
                                         emit(out, pos.pretty()); }
-        else if (cmd == "quit")       break;
+        else if (cmd == "quit")       { break; }
     }
     // EOF or `quit`: drain any pending search so its writes to `out`
     // complete before `out` (typically a caller-owned stream) is torn down.

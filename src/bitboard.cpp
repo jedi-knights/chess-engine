@@ -8,7 +8,7 @@ std::string pretty(Bitboard b) {
         o << (r + 1) << " |";
         for (int f = 0; f < 8; ++f) {
             Square s = make_square(File(f), Rank(r));
-            o << ' ' << ((b & square_bb(s)) ? 'X' : '.') << " |";
+            o << ' ' << (((b & square_bb(s)) != 0U) ? 'X' : '.') << " |";
         }
         o << "\n  +---+---+---+---+---+---+---+---+\n";
     }

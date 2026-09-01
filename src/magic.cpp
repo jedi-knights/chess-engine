@@ -30,13 +30,17 @@ Bitboard ROOK_ATTACKS  [NUM_SQUARES][4096];
 // during the search. Never called on the hot path.
 Bitboard slow_rook_attacks(Square s, Bitboard occ) {
     Bitboard atk = 0;
-    int f = file_of(s), r = rank_of(s);
+    int f = file_of(s);
+    int r = rank_of(s);
     auto walk = [&](int df, int dr) {
-        int ff = f + df, rr = r + dr;
+        int ff = f + df;
+        int rr = r + dr;
         while (ff >= 0 && ff <= 7 && rr >= 0 && rr <= 7) {
             Bitboard bb = square_bb(make_square(File(ff), Rank(rr)));
             atk |= bb;
-            if (occ & bb) break;
+            if ((occ & bb) != 0U) {
+                break;
+            }
             ff += df; rr += dr;
         }
     };
@@ -46,13 +50,17 @@ Bitboard slow_rook_attacks(Square s, Bitboard occ) {
 
 Bitboard slow_bishop_attacks(Square s, Bitboard occ) {
     Bitboard atk = 0;
-    int f = file_of(s), r = rank_of(s);
+    int f = file_of(s);
+    int r = rank_of(s);
     auto walk = [&](int df, int dr) {
-        int ff = f + df, rr = r + dr;
+        int ff = f + df;
+        int rr = r + dr;
         while (ff >= 0 && ff <= 7 && rr >= 0 && rr <= 7) {
             Bitboard bb = square_bb(make_square(File(ff), Rank(rr)));
             atk |= bb;
-            if (occ & bb) break;
+            if ((occ & bb) != 0U) {
+                break;
+            }
             ff += df; rr += dr;
         }
     };
@@ -66,21 +74,39 @@ Bitboard slow_bishop_attacks(Square s, Bitboard occ) {
 // hash into fewer bits.
 Bitboard rook_mask(Square s) {
     Bitboard m = 0;
-    int f = file_of(s), r = rank_of(s);
-    for (int rr = r + 1; rr <= 6; ++rr) m |= square_bb(make_square(File(f),  Rank(rr)));
-    for (int rr = r - 1; rr >= 1; --rr) m |= square_bb(make_square(File(f),  Rank(rr)));
-    for (int ff = f + 1; ff <= 6; ++ff) m |= square_bb(make_square(File(ff), Rank(r)));
-    for (int ff = f - 1; ff >= 1; --ff) m |= square_bb(make_square(File(ff), Rank(r)));
+    int f = file_of(s);
+    int r = rank_of(s);
+    for (int rr = r + 1; rr <= 6; ++rr) {
+        m |= square_bb(make_square(File(f),  Rank(rr)));
+    }
+    for (int rr = r - 1; rr >= 1; --rr) {
+        m |= square_bb(make_square(File(f),  Rank(rr)));
+    }
+    for (int ff = f + 1; ff <= 6; ++ff) {
+        m |= square_bb(make_square(File(ff), Rank(r)));
+    }
+    for (int ff = f - 1; ff >= 1; --ff) {
+        m |= square_bb(make_square(File(ff), Rank(r)));
+    }
     return m;
 }
 
 Bitboard bishop_mask(Square s) {
     Bitboard m = 0;
-    int f = file_of(s), r = rank_of(s);
-    for (int ff = f+1, rr = r+1; ff <= 6 && rr <= 6; ++ff, ++rr) m |= square_bb(make_square(File(ff), Rank(rr)));
-    for (int ff = f+1, rr = r-1; ff <= 6 && rr >= 1; ++ff, --rr) m |= square_bb(make_square(File(ff), Rank(rr)));
-    for (int ff = f-1, rr = r+1; ff >= 1 && rr <= 6; --ff, ++rr) m |= square_bb(make_square(File(ff), Rank(rr)));
-    for (int ff = f-1, rr = r-1; ff >= 1 && rr >= 1; --ff, --rr) m |= square_bb(make_square(File(ff), Rank(rr)));
+    int f = file_of(s);
+    int r = rank_of(s);
+    for (int ff = f+1, rr = r+1; ff <= 6 && rr <= 6; ++ff, ++rr) {
+        m |= square_bb(make_square(File(ff), Rank(rr)));
+    }
+    for (int ff = f+1, rr = r-1; ff <= 6 && rr >= 1; ++ff, --rr) {
+        m |= square_bb(make_square(File(ff), Rank(rr)));
+    }
+    for (int ff = f-1, rr = r+1; ff >= 1 && rr <= 6; --ff, ++rr) {
+        m |= square_bb(make_square(File(ff), Rank(rr)));
+    }
+    for (int ff = f-1, rr = r-1; ff >= 1 && rr >= 1; --ff, --rr) {
+        m |= square_bb(make_square(File(ff), Rank(rr)));
+    }
     return m;
 }
 
@@ -112,7 +138,9 @@ public:
     bool next(Bitboard& out) {
         if (first_) { first_ = false; out = 0; return true; }
         subset_ = (subset_ - mask_) & mask_;
-        if (subset_ == 0) return false;
+        if (subset_ == 0) {
+            return false;
+        }
         out = subset_;
         return true;
     }
@@ -148,7 +176,9 @@ uint64_t find_magic(Square s, Bitboard mask, bool is_rook, uint64_t& seed,
         uint64_t magic = sparse_random(seed);
         // Heuristic filter: magics whose product with the mask has few
         // high bits set are almost always losers — skip early.
-        if (popcount((mask * magic) & 0xFF00000000000000ULL) < 6) continue;
+        if (popcount((mask * magic) & 0xFF00000000000000ULL) < 6) {
+            continue;
+        }
 
         std::fill(used.begin(), used.end(), 0ULL);
         bool ok = true;
@@ -162,7 +192,9 @@ uint64_t find_magic(Square s, Bitboard mask, bool is_rook, uint64_t& seed,
             }
         }
         if (ok) {
-            for (int j = 0; j < table_size; ++j) out_table[j] = used[j];
+            for (int j = 0; j < table_size; ++j) {
+                out_table[j] = used[j];
+            }
             return magic;
         }
     }

@@ -161,11 +161,13 @@ void init() {
             int r = rank_of(Square(sq));
             for (int ff = std::max(0, f - 1); ff <= std::min(7, f + 1); ++ff) {
                 if (c == WHITE) {
-                    for (int rr = r + 1; rr <= 7; ++rr)
+                    for (int rr = r + 1; rr <= 7; ++rr) {
                         mask |= square_bb(make_square(File(ff), Rank(rr)));
+                    }
                 } else {
-                    for (int rr = r - 1; rr >= 0; --rr)
+                    for (int rr = r - 1; rr >= 0; --rr) {
                         mask |= square_bb(make_square(File(ff), Rank(rr)));
+                    }
                 }
             }
             PASSED_PAWN_MASK[c][sq] = mask;
@@ -178,10 +180,11 @@ void init() {
 // packed into two accumulator refs — cheaper than one call per phase.
 static void passed_pawn_bonus(const Position& pos, Color us,
                               int& mg_out, int& eg_out) {
-    int mg = 0, eg = 0;
+    int mg = 0;
+    int eg = 0;
     const Bitboard enemy_pawns = pos.pieces[Color(us ^ 1)][PAWN];
     Bitboard our_pawns = pos.pieces[us][PAWN];
-    while (our_pawns) {
+    while (our_pawns != 0U) {
         Square s = pop_lsb(our_pawns);
         if ((PASSED_PAWN_MASK[us][s] & enemy_pawns) == 0) {
             // Advance rank from the pawn's starting side.
@@ -228,9 +231,8 @@ static constexpr Bitboard EVAL_FILE_H = 0x8080808080808080ULL;
 static Bitboard pawn_attacks_of(Color us, Bitboard pawns) {
     if (us == WHITE) {
         return ((pawns & ~EVAL_FILE_A) << 7) | ((pawns & ~EVAL_FILE_H) << 9);
-    } else {
-        return ((pawns & ~EVAL_FILE_H) >> 7) | ((pawns & ~EVAL_FILE_A) >> 9);
     }
+    return ((pawns & ~EVAL_FILE_H) >> 7) | ((pawns & ~EVAL_FILE_A) >> 9);
 }
 
 static int mobility(const Position& pos, Color us) {
@@ -242,16 +244,16 @@ static int mobility(const Position& pos, Color us) {
     int score = 0;
 
     Bitboard b = pos.pieces[us][KNIGHT];
-    while (b) { Square s = pop_lsb(b);
+    while (b != 0U) { Square s = pop_lsb(b);
                 score += MOB_KNIGHT * popcount(KNIGHT_ATTACKS[s] & mask); }
     b = pos.pieces[us][BISHOP];
-    while (b) { Square s = pop_lsb(b);
+    while (b != 0U) { Square s = pop_lsb(b);
                 score += MOB_BISHOP * popcount(bishop_attacks(s, occ) & mask); }
     b = pos.pieces[us][ROOK];
-    while (b) { Square s = pop_lsb(b);
+    while (b != 0U) { Square s = pop_lsb(b);
                 score += MOB_ROOK   * popcount(rook_attacks(s, occ)   & mask); }
     b = pos.pieces[us][QUEEN];
-    while (b) { Square s = pop_lsb(b);
+    while (b != 0U) { Square s = pop_lsb(b);
                 score += MOB_QUEEN  * popcount(
                     (bishop_attacks(s, occ) | rook_attacks(s, occ)) & mask); }
 
@@ -271,8 +273,10 @@ int evaluate(const Position& pos) {
 
     // Passed pawns — separate MG and EG tables since a passed pawn is
     // a mild bonus in the middlegame and often decisive in the endgame.
-    int passed_w_mg = 0, passed_w_eg = 0;
-    int passed_b_mg = 0, passed_b_eg = 0;
+    int passed_w_mg = 0;
+    int passed_w_eg = 0;
+    int passed_b_mg = 0;
+    int passed_b_eg = 0;
     passed_pawn_bonus(pos, WHITE, passed_w_mg, passed_w_eg);
     passed_pawn_bonus(pos, BLACK, passed_b_mg, passed_b_eg);
     mg_diff += passed_w_mg - passed_b_mg;
@@ -289,6 +293,6 @@ int evaluate(const Position& pos) {
     }
 
     int phase = compute_phase(pos);
-    int score = (mg_diff * phase + eg_diff * (PHASE_MAX - phase)) / PHASE_MAX;
+    int score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
 }
