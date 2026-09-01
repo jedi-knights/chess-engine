@@ -35,6 +35,13 @@ struct Position {
     int      fullmove_number = 1;
     uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
 
+    // Incremental eval accumulators — sum of (material + PST) for every
+    // piece on the board, per color. Maintained by put_piece / remove_piece
+    // so evaluate() can just subtract and phase-interpolate instead of
+    // looping over every piece.
+    int      psq_mg[NUM_COLORS] = {0, 0};
+    int      psq_eg[NUM_COLORS] = {0, 0};
+
     void        clear();
     bool        set_from_fen(const std::string& fen);
     std::string to_fen() const;

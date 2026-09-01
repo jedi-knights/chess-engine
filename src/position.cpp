@@ -1,5 +1,6 @@
 #include "position.h"
 #include "bitboard.h"
+#include "eval.h"
 #include "zobrist.h"
 
 #include <cassert>
@@ -37,6 +38,8 @@ void Position::clear() {
     halfmove_clock  = 0;
     fullmove_number = 1;
     key             = 0;
+    psq_mg[WHITE] = psq_mg[BLACK] = 0;
+    psq_eg[WHITE] = psq_eg[BLACK] = 0;
 }
 
 bool Position::set_from_fen(const std::string& fen) {
@@ -81,6 +84,23 @@ bool Position::set_from_fen(const std::string& fen) {
         ep_square = make_square(File(ep[0] - 'a'), Rank(ep[1] - '1'));
     }
     key = zobrist::compute(*this);
+
+    // set_from_fen writes bitboards directly rather than going through
+    // put_piece, so the incremental psq accumulators are still 0. Recompute
+    // from scratch — this only runs on set_from_fen / ucinewgame boundaries
+    // so it isn't in the search hot path.
+    psq_mg[WHITE] = psq_mg[BLACK] = 0;
+    psq_eg[WHITE] = psq_eg[BLACK] = 0;
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int pt = PAWN; pt <= KING; ++pt) {
+            Bitboard bb = pieces[c][pt];
+            while (bb) {
+                Square s = pop_lsb(bb);
+                psq_mg[c] += eval::psq_mg(Color(c), PieceType(pt), s);
+                psq_eg[c] += eval::psq_eg(Color(c), PieceType(pt), s);
+            }
+        }
+    }
     return true;
 }
 
@@ -132,23 +152,31 @@ static constexpr int CR_MASK[NUM_SQUARES] = {
 void Position::put_piece(Square s, Piece p) {
     assert(board[s] == NO_PIECE);
     assert(p != NO_PIECE);
+    Color     c  = color_of(p);
+    PieceType pt = type_of(p);
     board[s]                     = p;
     Bitboard bb                  = square_bb(s);
-    pieces[color_of(p)][type_of(p)] |= bb;
-    colors[color_of(p)]         |= bb;
+    pieces[c][pt]               |= bb;
+    colors[c]                   |= bb;
     occupied                    |= bb;
-    key ^= zobrist::PIECE_SQ[color_of(p)][type_of(p)][s];
+    key                         ^= zobrist::PIECE_SQ[c][pt][s];
+    psq_mg[c]                   += eval::psq_mg(c, pt, s);
+    psq_eg[c]                   += eval::psq_eg(c, pt, s);
 }
 
 void Position::remove_piece(Square s) {
     Piece p = board[s];
     assert(p != NO_PIECE);
+    Color     c  = color_of(p);
+    PieceType pt = type_of(p);
     board[s]                     = NO_PIECE;
     Bitboard bb                  = square_bb(s);
-    pieces[color_of(p)][type_of(p)] &= ~bb;
-    colors[color_of(p)]         &= ~bb;
+    pieces[c][pt]               &= ~bb;
+    colors[c]                   &= ~bb;
     occupied                    &= ~bb;
-    key ^= zobrist::PIECE_SQ[color_of(p)][type_of(p)][s];
+    key                         ^= zobrist::PIECE_SQ[c][pt][s];
+    psq_mg[c]                   -= eval::psq_mg(c, pt, s);
+    psq_eg[c]                   -= eval::psq_eg(c, pt, s);
 }
 
 void Position::make_move(Move m, UndoInfo& u) {
