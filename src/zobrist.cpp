@@ -11,7 +11,9 @@ namespace zobrist {
 // should hash the same, otherwise repetition detection and TT collisions
 // diverge on positions that a caller would treat as equivalent.
 bool ep_is_capturable(const Position& pos) {
-    if (pos.ep_square == NO_SQUARE) return false;
+    if (pos.ep_square == NO_SQUARE) {
+        return false;
+    }
     const Color us = pos.side_to_move;
     return (PAWN_ATTACKS[Color(us ^ 1)][pos.ep_square]
             & pos.pieces[us][PAWN]) != 0;
@@ -39,12 +41,19 @@ uint64_t splitmix64(uint64_t& state) {
 
 void init() {
     uint64_t state = 0xC0FFEE12345678ULL;
-    for (int c = 0; c < NUM_COLORS; ++c)
-        for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt)
-            for (int s = 0; s < NUM_SQUARES; ++s)
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) {
+            for (int s = 0; s < NUM_SQUARES; ++s) {
                 PIECE_SQ[c][pt][s] = splitmix64(state);
-    for (int i = 0; i < 16; ++i) CASTLING[i] = splitmix64(state);
-    for (int i = 0; i < 8;  ++i) EP_FILE[i]  = splitmix64(state);
+            }
+        }
+    }
+    for (int i = 0; i < 16; ++i) {
+        CASTLING[i] = splitmix64(state);
+    }
+    for (int i = 0; i < 8;  ++i) {
+        EP_FILE[i]  = splitmix64(state);
+    }
     SIDE = splitmix64(state);
 }
 
@@ -53,15 +62,19 @@ uint64_t compute(const Position& pos) {
     for (int c = 0; c < NUM_COLORS; ++c) {
         for (int pt = PAWN; pt <= KING; ++pt) {
             Bitboard bb = pos.pieces[c][pt];
-            while (bb) {
+            while (bb != 0U) {
                 Square s = pop_lsb(bb);
                 k ^= PIECE_SQ[c][pt][s];
             }
         }
     }
     k ^= CASTLING[pos.castling & 15];
-    if (ep_is_capturable(pos))     k ^= EP_FILE[file_of(pos.ep_square)];
-    if (pos.side_to_move == BLACK) k ^= SIDE;
+    if (ep_is_capturable(pos))     {
+        k ^= EP_FILE[file_of(pos.ep_square)];
+    }
+    if (pos.side_to_move == BLACK) {
+        k ^= SIDE;
+    }
     return k;
 }
 

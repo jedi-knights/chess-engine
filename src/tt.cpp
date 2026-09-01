@@ -5,13 +5,18 @@ TranspositionTable::TranspositionTable(size_t entries_pow2)
       mask_((size_t{1} << entries_pow2) - 1) {}
 
 void TranspositionTable::clear() {
-    for (auto& e : entries_) e = TTEntry{};
+    for (auto& e : entries_) {
+        e = TTEntry{};
+    }
 }
 
-bool TranspositionTable::probe(uint64_t key, int depth, int alpha, int beta,
-                                int& out_score, Move& out_move) const {
+// (key, depth, alpha, beta) is chess-engine TT convention; matches every reference implementation. Out-params grouped by convention too.
+bool TranspositionTable::probe(uint64_t key, int depth, int alpha, int beta,  // NOLINT(bugprone-easily-swappable-parameters)
+                                int& out_score, Move& out_move) const {       // NOLINT(bugprone-easily-swappable-parameters)
     const TTEntry& e = entries_[key & mask_];
-    if (e.key != key || e.bound == TT_NONE) return false;
+    if (e.key != key || e.bound == TT_NONE) {
+        return false;
+    }
 
     // Move hint is always safe to hand back — it's just an ordering tip.
     out_move = e.move;
@@ -19,7 +24,9 @@ bool TranspositionTable::probe(uint64_t key, int depth, int alpha, int beta,
     // Score is only trustworthy if the stored search went at least as
     // deep as we're asking for; a shallower entry might have pruned
     // subtrees the current window needs to see.
-    if (e.depth < depth) return false;
+    if (e.depth < depth) {
+        return false;
+    }
 
     switch (e.bound) {
         case TT_EXACT:
@@ -36,6 +43,7 @@ bool TranspositionTable::probe(uint64_t key, int depth, int alpha, int beta,
     }
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — (key, depth, score, move, bound) is chess-engine TT convention; matches every reference implementation.
 void TranspositionTable::store(uint64_t key, int depth, int score,
                                 Move move, TTBound bound) {
     TTEntry& e = entries_[key & mask_];

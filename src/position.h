@@ -5,7 +5,7 @@
 constexpr const char* STARTPOS_FEN =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
-enum CastlingRights : int {
+enum CastlingRights : std::uint8_t {
     NO_CASTLING  = 0,
     WHITE_OO     = 1, WHITE_OOO = 2,
     BLACK_OO     = 4, BLACK_OOO = 8,

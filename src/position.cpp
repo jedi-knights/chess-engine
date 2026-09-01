@@ -3,6 +3,7 @@
 #include "eval.h"
 #include "zobrist.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cctype>
 #include <cstdlib>
@@ -26,10 +27,14 @@ static char char_from_piece(Piece p) {
 }
 
 void Position::clear() {
-    for (int i = 0; i < NUM_SQUARES; ++i) board[i] = NO_PIECE;
+    for (int i = 0; i < NUM_SQUARES; ++i) {
+        board[i] = NO_PIECE;
+    }
     for (int c = 0; c < NUM_COLORS; ++c) {
         colors[c] = 0;
-        for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) pieces[c][pt] = 0;
+        for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) {
+            pieces[c][pt] = 0;
+        }
     }
     occupied        = 0;
     side_to_move    = WHITE;
@@ -43,20 +48,29 @@ void Position::clear() {
     history_size    = 0;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — FEN parsing is inherently a multi-field state machine; splitting into helpers would be more lines and no clearer.
 bool Position::set_from_fen(const std::string& fen) {
     clear();
     std::istringstream ss(fen);
-    std::string placement, active, castle, ep;
-    if (!(ss >> placement >> active >> castle >> ep)) return false;
+    std::string placement;
+    std::string active;
+    std::string castle;
+    std::string ep;
+    if (!(ss >> placement >> active >> castle >> ep)) {
+        return false;
+    }
     ss >> halfmove_clock >> fullmove_number;
 
-    int r = 7, f = 0;
+    int r = 7;
+    int f = 0;
     for (char c : placement) {
         if (c == '/') { --r; f = 0; }
-        else if (std::isdigit(static_cast<unsigned char>(c))) { f += c - '0'; }
+        else if (std::isdigit(static_cast<unsigned char>(c)) != 0) { f += c - '0'; }
         else {
             Piece p = piece_from_char(c);
-            if (p == NO_PIECE || r < 0 || f > 7) return false;
+            if (p == NO_PIECE || r < 0 || f > 7) {
+                return false;
+            }
             Square    s   = make_square(File(f), Rank(r));
             Color     col = (p < B_PAWN) ? WHITE : BLACK;
             PieceType pt  = PieceType(p < B_PAWN ? p : p - 8);
@@ -95,7 +109,7 @@ bool Position::set_from_fen(const std::string& fen) {
     for (int c = 0; c < NUM_COLORS; ++c) {
         for (int pt = PAWN; pt <= KING; ++pt) {
             Bitboard bb = pieces[c][pt];
-            while (bb) {
+            while (bb != 0U) {
                 Square s = pop_lsb(bb);
                 psq_mg[c] += eval::psq_mg(Color(c), PieceType(pt), s);
                 psq_eg[c] += eval::psq_eg(Color(c), PieceType(pt), s);
@@ -110,32 +124,53 @@ bool Position::set_from_fen(const std::string& fen) {
     return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — FEN emission mirrors set_from_fen: a serialization state machine, kept as one function so the round-trip contract is co-located.
 std::string Position::to_fen() const {
     std::ostringstream o;
     for (int r = 7; r >= 0; --r) {
         int empty = 0;
         for (int f = 0; f < 8; ++f) {
             Piece p = board[make_square(File(f), Rank(r))];
-            if (p == NO_PIECE) ++empty;
+            if (p == NO_PIECE) {
+                ++empty;
+            }
             else {
-                if (empty) { o << empty; empty = 0; }
+                if (empty != 0) { o << empty; empty = 0; }
                 o << char_from_piece(p);
             }
         }
-        if (empty) o << empty;
-        if (r > 0) o << '/';
+        if (empty != 0) {
+            o << empty;
+        }
+        if (r > 0) {
+            o << '/';
+        }
     }
     o << ' ' << (side_to_move == WHITE ? 'w' : 'b') << ' ';
-    if (castling == NO_CASTLING) o << '-';
+    if (castling == NO_CASTLING) {
+        o << '-';
+    }
     else {
-        if (castling & WHITE_OO)  o << 'K';
-        if (castling & WHITE_OOO) o << 'Q';
-        if (castling & BLACK_OO)  o << 'k';
-        if (castling & BLACK_OOO) o << 'q';
+        if ((castling & WHITE_OO) != 0)  {
+            o << 'K';
+        }
+        if ((castling & WHITE_OOO) != 0) {
+            o << 'Q';
+        }
+        if ((castling & BLACK_OO) != 0)  {
+            o << 'k';
+        }
+        if ((castling & BLACK_OOO) != 0) {
+            o << 'q';
+        }
     }
     o << ' ';
-    if (ep_square == NO_SQUARE) o << '-';
-    else o << char('a' + file_of(ep_square)) << char('1' + rank_of(ep_square));
+    if (ep_square == NO_SQUARE) {
+        o << '-';
+    }
+    else {
+        o << char('a' + file_of(ep_square)) << char('1' + rank_of(ep_square));
+    }
     o << ' ' << halfmove_clock << ' ' << fullmove_number;
     return o.str();
 }
@@ -185,6 +220,7 @@ void Position::remove_piece(Square s) {
     psq_eg[c]                   -= eval::psq_eg(c, pt, s);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — make_move handles normal, capture, en-passant, castling, and promotion in one fused function so the incremental Zobrist + PSQ updates stay in one place; splitting duplicates the piece-swap boilerplate 4x.
 void Position::make_move(Move m, UndoInfo& u) {
     const Square   from   = move_from(m);
     const Square   to     = move_to(m);
@@ -201,9 +237,11 @@ void Position::make_move(Move m, UndoInfo& u) {
     u.ep_square      = ep_square;
     u.halfmove_clock = halfmove_clock;
     u.key            = key;
-    u.captured       = (mt == MT_EN_PASSANT)
-        ? Piece(us == WHITE ? B_PAWN : W_PAWN)
-        : board[to];
+    if (mt == MT_EN_PASSANT) {
+        u.captured = Piece(us == WHITE ? B_PAWN : W_PAWN);
+    } else {
+        u.captured = board[to];
+    }
 
     // Roll the pre-move castling/ep/side keys OUT now. The corresponding
     // post-move keys are XOR'd back in at the end after those fields are
@@ -211,7 +249,9 @@ void Position::make_move(Move m, UndoInfo& u) {
     // EP is hashed only when the ep capture is pseudo-legal — same rule
     // as zobrist::compute, so incremental key stays in sync.
     key ^= zobrist::CASTLING[castling & 15];
-    if (zobrist::ep_is_capturable(*this)) key ^= zobrist::EP_FILE[file_of(ep_square)];
+    if (zobrist::ep_is_capturable(*this)) {
+        key ^= zobrist::EP_FILE[file_of(ep_square)];
+    }
 
     // Remove captured piece first (en passant captures off-square).
     if (u.captured != NO_PIECE) {
@@ -232,7 +272,8 @@ void Position::make_move(Move m, UndoInfo& u) {
 
     // Castling: the king move is already applied; also move the rook.
     if (mt == MT_CASTLING) {
-        Square rook_from, rook_to;
+        Square rook_from;
+        Square rook_to;
         if (file_of(to) == FILE_G) {  // kingside
             rook_from = Square(int(to) + 1);
             rook_to   = Square(int(to) - 1);
@@ -256,17 +297,25 @@ void Position::make_move(Move m, UndoInfo& u) {
     }
 
     // Halfmove clock: reset on pawn move or capture.
-    if (type_of(moving) == PAWN || u.captured != NO_PIECE) halfmove_clock = 0;
-    else                                                    ++halfmove_clock;
+    if (type_of(moving) == PAWN || u.captured != NO_PIECE) {
+        halfmove_clock = 0;
+    }
+    else {
+        ++halfmove_clock;
+    }
 
-    if (us == BLACK) ++fullmove_number;
+    if (us == BLACK) {
+        ++fullmove_number;
+    }
     side_to_move = them;
 
     // Roll the new castling / ep / side keys IN. SIDE toggles on every
     // move (XOR is self-inverse) regardless of which color moved. EP
     // hash matches compute()'s rule (pseudo-legal only).
     key ^= zobrist::CASTLING[castling & 15];
-    if (zobrist::ep_is_capturable(*this)) key ^= zobrist::EP_FILE[file_of(ep_square)];
+    if (zobrist::ep_is_capturable(*this)) {
+        key ^= zobrist::EP_FILE[file_of(ep_square)];
+    }
     key ^= zobrist::SIDE;
 
     // Push the post-move key so repetition detection sees this state.
@@ -292,7 +341,9 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
     const Color    us   = Color(side_to_move ^ 1);   // the mover, before flip
 
     side_to_move = us;
-    if (us == BLACK) --fullmove_number;
+    if (us == BLACK) {
+        --fullmove_number;
+    }
 
     // Undo the piece move. For promotion, restore a pawn at `from` rather
     // than the promoted piece.
@@ -314,7 +365,8 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
 
     // Undo castling rook move.
     if (mt == MT_CASTLING) {
-        Square rook_from, rook_to;
+        Square rook_from;
+        Square rook_to;
         if (file_of(to) == FILE_G) {
             rook_from = Square(int(to) + 1);
             rook_to   = Square(int(to) - 1);
@@ -335,7 +387,9 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
     // equal the pre-move key).
     key            = u.key;
     // Pop the repetition-history entry pushed by the matching make_move.
-    if (history_size > 0) --history_size;
+    if (history_size > 0) {
+        --history_size;
+    }
 }
 
 bool Position::is_repetition() const {
@@ -344,10 +398,12 @@ bool Position::is_repetition() const {
     // boundary — pawn moves and captures are irreversible, so any
     // position before the last such move can't be reached again.
     int stop = history_size - 1 - halfmove_clock;
-    if (stop < 0) stop = 0;
+    stop = std::max(stop, 0);
     // history[history_size - 1] is the CURRENT position — skip it.
     for (int i = history_size - 3; i >= stop; i -= 2) {
-        if (history[i] == key) return true;
+        if (history[i] == key) {
+            return true;
+        }
     }
     return false;
 }

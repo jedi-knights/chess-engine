@@ -30,13 +30,21 @@ TranspositionTable& tt() {
 // converted to a ply-invariant "distance to mate from the storing node"
 // on store and back to "distance from probing node" on probe.
 int score_to_tt(int score, int ply) {
-    if (score >  MATE_SCORE - 1000) return score + ply;
-    if (score < -MATE_SCORE + 1000) return score - ply;
+    if (score >  MATE_SCORE - 1000) {
+        return score + ply;
+    }
+    if (score < -MATE_SCORE + 1000) {
+        return score - ply;
+    }
     return score;
 }
 int score_from_tt(int score, int ply) {
-    if (score >  MATE_SCORE - 1000) return score - ply;
-    if (score < -MATE_SCORE + 1000) return score + ply;
+    if (score >  MATE_SCORE - 1000) {
+        return score - ply;
+    }
+    if (score < -MATE_SCORE + 1000) {
+        return score + ply;
+    }
     return score;
 }
 
@@ -77,12 +85,16 @@ constexpr int HISTORY_MAX = 16'000;
 // checks the syscall/atomic-load overhead would dominate the search on
 // short movetimes.
 bool should_stop(SearchContext& ctx) {
-    if ((ctx.nodes & 0x3FF) != 0) return false;
-    if (ctx.limits.external_stop &&
+    if ((ctx.nodes & 0x3FF) != 0) {
+        return false;
+    }
+    if ((ctx.limits.external_stop != nullptr) &&
         ctx.limits.external_stop->load(std::memory_order_relaxed)) {
         return true;
     }
-    if (ctx.limits.movetime_ms == 0) return false;
+    if (ctx.limits.movetime_ms == 0) {
+        return false;
+    }
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         Clock::now() - ctx.start).count();
     return elapsed_ms >= ctx.limits.movetime_ms;
@@ -92,7 +104,9 @@ bool should_stop(SearchContext& ctx) {
 // the destination square is occupied (normal capture) or the move is en
 // passant (destination empty; captured pawn sits on an adjacent square).
 bool is_capture(const Position& pos, Move m) {
-    if (move_type(m) == MT_EN_PASSANT) return true;
+    if (move_type(m) == MT_EN_PASSANT) {
+        return true;
+    }
     return pos.board[move_to(m)] != NO_PIECE;
 }
 
@@ -188,7 +202,9 @@ int see(const Position& pos, Move m) {
 
     while (true) {
         Bitboard side_atk = attackers & pos.colors[side];
-        if (!side_atk) break;
+        if (side_atk == 0U) {
+            break;
+        }
 
         // Least-valuable attacker of `side`. Piece iteration order
         // is PAWN..KING, so the first match is the cheapest attacker.
@@ -196,7 +212,7 @@ int see(const Position& pos, Move m) {
         PieceType lva_pt = NO_PIECE_TYPE;
         for (int pt = PAWN; pt <= KING; ++pt) {
             Bitboard cands = side_atk & pos.pieces[side][pt];
-            if (cands) {
+            if (cands != 0U) {
                 lva_sq = lsb(cands);
                 lva_pt = PieceType(pt);
                 break;
@@ -207,7 +223,9 @@ int see(const Position& pos, Move m) {
         gain[d] = SEE_VALUE[attacker_type] - gain[d - 1];
         // Speculative pruning: if the current best guaranteed outcome
         // is already losing, stop — deeper captures can't rescue us.
-        if (std::max(-gain[d - 1], gain[d]) < 0) break;
+        if (std::max(-gain[d - 1], gain[d]) < 0) {
+            break;
+        }
 
         // Remove the attacker from occupancy; uncover any xray sliders.
         occ ^= square_bb(lva_sq);
@@ -247,7 +265,9 @@ int see(const Position& pos, Move m) {
 // an opponent piece can recapture the promoted queen for a net loss.
 int move_ordering_score(const Position& pos, Move m, Move tt_move,
                         const SearchContext& ctx, int ply) {
-    if (m == tt_move) return 10'000'000;
+    if (m == tt_move) {
+        return 10'000'000;
+    }
 
     const bool cap   = is_capture(pos, m);
     const bool promo = move_type(m) == MT_PROMOTION;
@@ -260,8 +280,12 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
     }
 
     const int p = (ply < MAX_PLY) ? ply : MAX_PLY - 1;
-    if      (m == ctx.killers[p][0]) return 900'000;
-    else if (m == ctx.killers[p][1]) return 800'000;
+    if      (m == ctx.killers[p][0]) {
+        return 900'000;
+    }
+    if (m == ctx.killers[p][1]) {
+        return 800'000;
+    }
 
     PieceType pt = type_of(pos.board[move_from(m)]);
     return ctx.history[pos.side_to_move][pt][move_to(m)];
@@ -319,16 +343,22 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
 
     if (!checked) {
         int stand_pat = evaluate(pos);
-        if (stand_pat >= beta)   return beta;
-        if (stand_pat > alpha)   alpha = stand_pat;
+        if (stand_pat >= beta) {
+            return beta;
+        }
+        alpha = std::max(alpha, stand_pat);
     }
 
     // In-check nodes need every legal move (evasion may require a quiet
     // block or king step). Quiet nodes only need captures + promotions —
     // stand_pat already handled the "do nothing" baseline.
     MoveList moves;
-    if (checked) generate_moves   (pos, moves);
-    else         generate_captures(pos, moves);
+    if (checked) {
+        generate_moves   (pos, moves);
+    }
+    else {
+        generate_captures(pos, moves);
+    }
 
     if (moves.empty()) {
         // Two very different meanings here:
@@ -353,15 +383,21 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
         // Also skip further quiet moves at qsearch — they're only here
         // because we're in check, and if we've dropped below the capture
         // band, we've exhausted meaningful evasions from ordering.
-        if (!checked && scores[i] < 100'000) break;
+        if (!checked && scores[i] < 100'000) {
+            break;
+        }
 
         UndoInfo u;
         pos.make_move(m, u);
         int score = -qsearch(pos, -beta, -alpha, ply + 1, ctx);
         pos.unmake_move(m, u);
-        if (ctx.stopped)   return 0;
-        if (score >= beta) return beta;
-        if (score > alpha) alpha = score;
+        if (ctx.stopped) {
+            return 0;
+        }
+        if (score >= beta) {
+            return beta;
+        }
+        alpha = std::max(alpha, score);
     }
     return alpha;
 }
@@ -370,6 +406,7 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
 // `ply` is distance from the root so we can prefer shorter mates
 // (deeper mate scores are penalized) and shorter paths out of a
 // losing position (later mates score less negative).
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — fused PVS+null-move+LMR+razoring+RFP+killer/history hot path; every branch is a documented pruning technique with a measured node-count contribution (see CLAUDE.md search perf stack).
 int negamax(Position& pos, int depth, int alpha, int beta,
             int ply, SearchContext& ctx) {
     ++ctx.nodes;
@@ -387,11 +424,15 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     // mate combinations don't fall off the horizon. Computed once here
     // and reused for LMR gating below.
     const bool node_in_check = in_check(pos);
-    if (node_in_check) depth += 1;
+    if (node_in_check) {
+        depth += 1;
+    }
 
     // Leaf: hand off to quiescence rather than static-evaluating a
     // position that may be mid-exchange.
-    if (depth <= 0) return qsearch(pos, alpha, beta, ply, ctx);
+    if (depth <= 0) {
+        return qsearch(pos, alpha, beta, ply, ctx);
+    }
 
     // TT probe: may return an immediately-usable score, and always hands
     // back a move to try first if the key was seen before.
@@ -420,12 +461,14 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         constexpr int RFP_MARGIN   = 80;    // cp per depth ply
         constexpr int RAZOR_MARGIN = 200;   // cp
 
-        if (depth <= 6 && se - RFP_MARGIN * depth >= beta) {
+        if (depth <= 6 && se - (RFP_MARGIN * depth) >= beta) {
             return se;
         }
         if (depth <= 2 && se + RAZOR_MARGIN <= alpha) {
             int qs = qsearch(pos, alpha, beta, ply, ctx);
-            if (qs <= alpha) return qs;
+            if (qs <= alpha) {
+                return qs;
+            }
         }
     }
 
@@ -443,17 +486,19 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     //    (zugzwang guard: in pure king-pawn endgames, passing is often
     //    strictly worse than any real move, so null-move gives false
     //    prunings that lose the game).
-    const bool has_non_pawn = pos.pieces[pos.side_to_move][KNIGHT] |
-                              pos.pieces[pos.side_to_move][BISHOP] |
-                              pos.pieces[pos.side_to_move][ROOK]   |
-                              pos.pieces[pos.side_to_move][QUEEN];
+    const bool has_non_pawn = (pos.pieces[pos.side_to_move][KNIGHT] |
+                               pos.pieces[pos.side_to_move][BISHOP] |
+                               pos.pieces[pos.side_to_move][ROOK]   |
+                               pos.pieces[pos.side_to_move][QUEEN]) != 0U;
     if (depth >= 3 && !node_in_check && has_non_pawn &&
         std::abs(beta) < MATE_SCORE - 1000) {
         // Make null move inline (no ~30-byte UndoInfo, no board changes):
         // just flip side, clear ep, adjust Zobrist for those two.
         const Square   saved_ep  = pos.ep_square;
         const uint64_t saved_key = pos.key;
-        if (saved_ep != NO_SQUARE) pos.key ^= zobrist::EP_FILE[file_of(saved_ep)];
+        if (saved_ep != NO_SQUARE) {
+            pos.key ^= zobrist::EP_FILE[file_of(saved_ep)];
+        }
         pos.ep_square    = NO_SQUARE;
         pos.side_to_move = Color(pos.side_to_move ^ 1);
         pos.key         ^= zobrist::SIDE;
@@ -466,15 +511,21 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         pos.ep_square    = saved_ep;
         pos.key          = saved_key;
 
-        if (ctx.stopped) return 0;
-        if (null_score >= beta) return beta;      // fail-high: prune the whole subtree
+        if (ctx.stopped) {
+            return 0;
+        }
+        if (null_score >= beta) {
+            return beta;      // fail-high: prune the whole subtree
+        }
     }
 
     MoveList moves;
     generate_moves(pos, moves);
 
     if (moves.empty()) {
-        if (node_in_check) return -MATE_SCORE + ply;
+        if (node_in_check) {
+            return -MATE_SCORE + ply;
+        }
         return 0;   // stalemate
     }
 
@@ -511,7 +562,10 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         } else {
             const bool can_reduce = depth >= 3 && !is_cap && !is_promo
                                   && !node_in_check;
-            const int  reduction  = can_reduce ? ((i >= 12) ? 2 : 1) : 0;
+            int reduction = 0;
+            if (can_reduce) {
+                reduction = (i >= 12) ? 2 : 1;
+            }
             score = -negamax(pos, depth - 1 - reduction,
                              -alpha - 1, -alpha, ply + 1, ctx);
             if (score > alpha && (reduction > 0 || score < beta)) {
@@ -524,9 +578,11 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         }
 
         pos.unmake_move(m, u);
-        if (ctx.stopped) return 0;                // bubble up cancellation
+        if (ctx.stopped) {
+            return 0;                // bubble up cancellation
+        }
         if (score > best)  { best = score; best_move = m; }
-        if (score > alpha) alpha = score;
+        alpha = std::max(alpha, score);
         if (alpha >= beta) {
             // Beta cutoff on a quiet, non-promotion move: record as a
             // killer at this ply and bump history. Captures and promos
@@ -540,7 +596,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                 PieceType pt = type_of(pos.board[move_from(m)]);
                 int& h = ctx.history[pos.side_to_move][pt][move_to(m)];
                 h += depth * depth;
-                if (h > HISTORY_MAX) h = HISTORY_MAX;
+                h = std::min(h, HISTORY_MAX);
             }
             break;
         }
@@ -550,9 +606,12 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     // original window. `best >= beta` means a fail-high (LOWER bound);
     // `best <= original_alpha` means no move improved on alpha (UPPER
     // bound); otherwise the score is exact.
-    TTBound bound = (best >= beta)            ? TT_LOWER
-                  : (best <= original_alpha)  ? TT_UPPER
-                                              : TT_EXACT;
+    TTBound bound = TT_EXACT;
+    if (best >= beta) {
+        bound = TT_LOWER;
+    } else if (best <= original_alpha) {
+        bound = TT_UPPER;
+    }
     tt().store(pos.key, depth, score_to_tt(best, ply), best_move, bound);
     return best;
 }
@@ -562,6 +621,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
 // mid-iteration. The window parameters enable aspiration search — when
 // the returned score lands outside the window, the caller re-searches
 // with a wider one.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — (depth, alpha, beta) is standard chess-engine search-node argument order.
 bool search_root(Position& pos, int depth,
                  int alpha_init, int beta_root,
                  SearchContext& ctx, SearchResult& out) {
@@ -613,14 +673,18 @@ bool search_root(Position& pos, int depth,
             }
         }
         pos.unmake_move(m, u);
-        if (ctx.stopped) return false;
+        if (ctx.stopped) {
+            return false;
+        }
         if (score > best)  { best = score; best_move = m; }
-        if (score > alpha) alpha = score;
+        alpha = std::max(alpha, score);
         // Fail-high at root: with aspiration windows beta_root is finite
         // and a move that beats it means our score estimate was too low —
         // the caller widens and re-searches, so no point iterating the
         // remaining moves (they can't lower the fail-high score).
-        if (alpha >= beta_root) break;
+        if (alpha >= beta_root) {
+            break;
+        }
     }
     out.best_move = best_move;
     out.score     = best;
@@ -638,10 +702,13 @@ bool search_root(Position& pos, int depth,
 // principal variation. Bounded by `max_len` and by defensive checks:
 // TT miss, TT-move illegal in the current position, or a cycle in the
 // walk all cause an early return.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — (position, move, depth-limit, out) is the natural signature; Move is uint16_t but semantically distinct from max_len.
 void build_pv(Position pos, Move best_move, int max_len,
               std::vector<Move>& out) {
     out.clear();
-    if (best_move == NULL_MOVE) return;
+    if (best_move == NULL_MOVE) {
+        return;
+    }
 
     // Fresh MoveList each generate_moves call — the generator appends, so
     // reusing across iterations would accumulate entries from prior plies.
@@ -651,7 +718,9 @@ void build_pv(Position pos, Move best_move, int max_len,
         return std::find(legal.begin(), legal.end(), want) != legal.end();
     };
 
-    if (!legal_in(pos, best_move)) return;
+    if (!legal_in(pos, best_move)) {
+        return;
+    }
 
     out.push_back(best_move);
     UndoInfo u;
@@ -661,17 +730,24 @@ void build_pv(Position pos, Move best_move, int max_len,
     for (int i = 1; i < max_len; ++i) {
         int  dummy_score;
         Move next;
-        if (!tt().probe(pos.key, /*depth=*/0, -INF, INF, dummy_score, next))
+        if (!tt().probe(pos.key, /*depth=*/0, -INF, INF, dummy_score, next)) {
             break;
-        if (next == NULL_MOVE) break;
-        if (!legal_in(pos, next)) break;
+        }
+        if (next == NULL_MOVE) {
+            break;
+        }
+        if (!legal_in(pos, next)) {
+            break;
+        }
 
         out.push_back(next);
         UndoInfo u2;
         pos.make_move(next, u2);
         // Cycle guard: TT collisions or transpositions can point us back
         // to a position already in the walk. Stop rather than loop.
-        if (std::find(seen.begin(), seen.end(), pos.key) != seen.end()) break;
+        if (std::find(seen.begin(), seen.end(), pos.key) != seen.end()) {
+            break;
+        }
         seen.push_back(pos.key);
     }
 }
@@ -692,8 +768,9 @@ void clear_transposition_table() {
     tt().clear();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — iterative-deepening driver fuses aspiration windows, time-management, PV extraction, and stop polling; splitting hurts readability more than it helps. See CLAUDE.md perf table.
 SearchResult search_iterative(Position& pos, SearchLimits limits,
-                              InfoCallback on_iter) {
+                              const InfoCallback& on_iter) {
     SearchContext ctx;
     ctx.limits = limits;
     ctx.start  = Clock::now();
@@ -726,7 +803,9 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
             int beta  = best.score + delta;
             while (true) {
                 completed = search_root(pos, d, alpha, beta, ctx, r);
-                if (!completed) break;
+                if (!completed) {
+                    break;
+                }
                 if (r.score <= alpha) {           // fail-low: widen alpha
                     delta *= 2;
                     alpha = (delta >= ASPIRATION_MAX) ? -INF : best.score - delta;
@@ -742,15 +821,21 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
         // For d > 1, only accept fully-completed iterations — a
         // partial deeper result is unreliable (best-move might come
         // from a losing subtree we hadn't refuted yet).
-        if (!completed && d > 1) break;
+        if (!completed && d > 1) {
+            break;
+        }
         r.nodes = ctx.nodes;
         // Reconstruct PV before firing the callback so UCI can print
         // the full line. Bounded by iteration depth so we don't chase
         // TT transpositions past what we actually searched.
         build_pv(pos, r.best_move, d, r.pv);
         best = r;
-        if (on_iter) on_iter(best);
-        if (ctx.stopped) break;
+        if (on_iter) {
+            on_iter(best);
+        }
+        if (ctx.stopped) {
+            break;
+        }
     }
 
     // Final guarantee: bestmove must be a legal move if any exist.
@@ -764,7 +849,9 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
         generate_moves(pos, moves);
         if (!moves.empty()) {
             best.best_move = moves[0];
-            if (best.depth == 0) best.depth = 1;
+            if (best.depth == 0) {
+                best.depth = 1;
+            }
         }
     }
     return best;
