@@ -1,5 +1,8 @@
 #include "search.h"
+#include "attacks.h"
+#include "bitboard.h"
 #include "eval.h"
+#include "magic.h"
 #include "movegen.h"
 #include "tt.h"
 #include "zobrist.h"
@@ -86,19 +89,137 @@ bool is_capture(const Position& pos, Move m) {
     return pos.board[move_to(m)] != NO_PIECE;
 }
 
-// Ordering scores. Bands are chosen so higher-priority classes always
-// outrank lower ones, even with the intra-band spread:
+// All pieces (either color) currently attacking `sq` given occupancy
+// `occ`. Uses the same leaper-attack / magic-slider lookups as the
+// legality check. Symmetric — no side awareness.
+Bitboard attackers_to(const Position& pos, Square sq, Bitboard occ) {
+    Bitboard bq = pos.pieces[WHITE][BISHOP] | pos.pieces[BLACK][BISHOP]
+                | pos.pieces[WHITE][QUEEN]  | pos.pieces[BLACK][QUEEN];
+    Bitboard rq = pos.pieces[WHITE][ROOK]   | pos.pieces[BLACK][ROOK]
+                | pos.pieces[WHITE][QUEEN]  | pos.pieces[BLACK][QUEEN];
+    return  (PAWN_ATTACKS[BLACK][sq] & pos.pieces[WHITE][PAWN])
+          | (PAWN_ATTACKS[WHITE][sq] & pos.pieces[BLACK][PAWN])
+          | (KNIGHT_ATTACKS[sq]      & (pos.pieces[WHITE][KNIGHT] | pos.pieces[BLACK][KNIGHT]))
+          | (KING_ATTACKS[sq]        & (pos.pieces[WHITE][KING]   | pos.pieces[BLACK][KING]))
+          | (bishop_attacks(sq, occ) & bq)
+          | (rook_attacks  (sq, occ) & rq);
+}
+
+// SEE piece values — same shape as PIECE_ORDER_VALUE but with king
+// low (a king is worth nothing in a swap: if we're capturing the king,
+// the position was illegal to begin with).
+constexpr int SEE_VALUE[NUM_PIECE_TYPES] = {
+    0, 100, 320, 330, 500, 900, 20000,
+};
+
+// Static Exchange Evaluation: net material change (in centipawns) after
+// all captures on `move_to(m)` play out with each side always using its
+// least-valuable available attacker. Positive means we come out ahead.
 //
-//   TT move           : 10,000,000
-//   Any capture       :  1,000,000 + MVV-LVA
-//   Killer 1          :    900,000
-//   Killer 2          :    800,000
-//   Quiet (history)   :     0..~500,000 in practice
+// Reference: Chess Programming Wiki, "SEE" — the classic gain[] array
+// with minimax backup. Xray attackers (pieces revealed after a blocker
+// captures away) are handled by recomputing slider attacks against the
+// remaining occupancy after each removal.
+int see(const Position& pos, Move m) {
+    const Square to   = move_to(m);
+    const Square from = move_from(m);
+    const bool is_ep  = move_type(m) == MT_EN_PASSANT;
+
+    // Victim value. En passant captures a pawn even though the target
+    // square is empty. Non-captures (no victim on `to` and not ep)
+    // shouldn't be passed to see(); return 0 defensively.
+    int victim_value;
+    if (is_ep) {
+        victim_value = SEE_VALUE[PAWN];
+    } else if (pos.board[to] != NO_PIECE) {
+        victim_value = SEE_VALUE[type_of(pos.board[to])];
+    } else {
+        return 0;
+    }
+
+    int gain[32];
+    int d = 0;
+    gain[d] = victim_value;
+
+    PieceType attacker_type = type_of(pos.board[from]);
+    Bitboard  occ           = pos.occupied ^ square_bb(from);
+    if (is_ep) {
+        // The captured pawn sits on an adjacent square, not `to` — remove
+        // it from occupancy so xray computations see through the gap.
+        Square cap_sq = (pos.side_to_move == WHITE)
+                        ? Square(int(to) - 8) : Square(int(to) + 8);
+        occ ^= square_bb(cap_sq);
+    }
+
+    // Pieces that can attack via a slider ray once a blocker leaves —
+    // used to add newly-visible xray attackers after each capture.
+    const Bitboard bq_all = pos.pieces[WHITE][BISHOP] | pos.pieces[BLACK][BISHOP]
+                          | pos.pieces[WHITE][QUEEN]  | pos.pieces[BLACK][QUEEN];
+    const Bitboard rq_all = pos.pieces[WHITE][ROOK]   | pos.pieces[BLACK][ROOK]
+                          | pos.pieces[WHITE][QUEEN]  | pos.pieces[BLACK][QUEEN];
+
+    Bitboard attackers = attackers_to(pos, to, occ) & occ;
+    Color side = Color(pos.side_to_move ^ 1);   // opponent moves next in the swap
+
+    while (true) {
+        Bitboard side_atk = attackers & pos.colors[side];
+        if (!side_atk) break;
+
+        // Least-valuable attacker of `side`. Piece iteration order
+        // is PAWN..KING, so the first match is the cheapest attacker.
+        Square    lva_sq = NO_SQUARE;
+        PieceType lva_pt = NO_PIECE_TYPE;
+        for (int pt = PAWN; pt <= KING; ++pt) {
+            Bitboard cands = side_atk & pos.pieces[side][pt];
+            if (cands) {
+                lva_sq = lsb(cands);
+                lva_pt = PieceType(pt);
+                break;
+            }
+        }
+
+        ++d;
+        gain[d] = SEE_VALUE[attacker_type] - gain[d - 1];
+        // Speculative pruning: if the current best guaranteed outcome
+        // is already losing, stop — deeper captures can't rescue us.
+        if (std::max(-gain[d - 1], gain[d]) < 0) break;
+
+        // Remove the attacker from occupancy; uncover any xray sliders.
+        occ ^= square_bb(lva_sq);
+        attackers &= ~square_bb(lva_sq);
+        attackers |= (bishop_attacks(to, occ) & bq_all);
+        attackers |= (rook_attacks  (to, occ) & rq_all);
+        attackers &= occ;   // keep only still-present pieces
+
+        attacker_type = lva_pt;
+        side = Color(side ^ 1);
+    }
+
+    // Minimax backup: at each level, the side to move chooses whether
+    // to make the capture or stop the swap. `-max(-parent, child)`
+    // encodes "opponent picks the worse of (stop here) vs (continue)."
+    // Guarded on d > 0 — a single capture with no follow-up (side had
+    // no attackers on first iteration) leaves d = 0 and no backup work
+    // to do.
+    while (d > 0) {
+        gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+        --d;
+    }
+    return gain[0];
+}
+
+// Ordering bands, now with SEE distinguishing winning captures (which
+// beat killers and quiets) from losing captures (which drop below
+// killers — trying them first would prune away real moves):
 //
-// The "victim*10 - attacker" MVV-LVA span (a few thousand) fits comfortably
-// inside the 100k gap between capture-base and killer-base.
+//   TT move            : 10,000,000
+//   Winning capture    :  1,000,000 + SEE
+//   Killer 1           :    900,000
+//   Killer 2           :    800,000
+//   Losing capture     :    100,000 + SEE            (still above quiets)
+//   Quiet (history)    :          0 .. ~500,000
 constexpr int PIECE_ORDER_VALUE[NUM_PIECE_TYPES] = {
-    0, 100, 320, 330, 500, 900, 20000,   // K high — captures on king shouldn't occur but guard anyway
+    0, 100, 320, 330, 500, 900, 20000,
 };
 
 int move_ordering_score(const Position& pos, Move m, Move tt_move,
@@ -108,14 +229,14 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
     int score = 0;
 
     if (is_capture(pos, m)) {
-        PieceType victim = (move_type(m) == MT_EN_PASSANT)
-            ? PAWN
-            : type_of(pos.board[move_to(m)]);
-        PieceType attacker = type_of(pos.board[move_from(m)]);
-        score = 1'000'000 + PIECE_ORDER_VALUE[victim] * 10 - PIECE_ORDER_VALUE[attacker];
+        int see_score = see(pos, m);
+        // Winning-or-equal captures go above killers; losing captures
+        // drop below them but stay above quiet moves so the search
+        // still considers them.
+        score = (see_score >= 0)
+            ? (1'000'000 + see_score)
+            : (  100'000 + see_score);
     } else {
-        // Quiet moves: killer > killer2 > history-ranked. Clamp ply to
-        // keep qsearch (which can nominally exceed MAX_PLY) safe.
         const int p = (ply < MAX_PLY) ? ply : MAX_PLY - 1;
         if      (m == ctx.killers[p][0]) score = 900'000;
         else if (m == ctx.killers[p][1]) score = 800'000;
@@ -126,8 +247,6 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
     }
 
     if (move_type(m) == MT_PROMOTION) {
-        // Applies on top of both branches; a capture-promotion earns both
-        // its capture score and its promotion piece value.
         score += PIECE_ORDER_VALUE[move_promotion(m)];
     }
     return score;
@@ -204,15 +323,22 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
         return checked ? (-MATE_SCORE + ply) : alpha;
     }
 
-    // MVV-LVA: try highest-victim captures first so the strong replies
-    // trigger beta cutoffs immediately. Qsearch doesn't probe the TT
-    // (leaves change rapidly and add little), so no move hint.
+    // SEE-scored ordering: winning captures first, losing captures below
+    // killers/history. Also enables the SEE prune below.
     int scores[MoveList::MAX_MOVES];
     score_moves(pos, moves, scores, NULL_MOVE, ctx, ply);
 
     for (int i = 0; i < moves.size(); ++i) {
         pick_move_to_front(moves, scores, i);
         Move m = moves[i];
+
+        // SEE prune: when not in check, skip losing captures — they can't
+        // improve alpha (down material after resolution). This is what
+        // makes qsearch actually cheap on tactical positions.
+        // Also skip further quiet moves at qsearch — they're only here
+        // because we're in check, and if we've dropped below the capture
+        // band, we've exhausted meaningful evasions from ordering.
+        if (!checked && scores[i] < 100'000) break;
 
         UndoInfo u;
         pos.make_move(m, u);
