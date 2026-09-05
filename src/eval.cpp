@@ -447,14 +447,85 @@ static int king_safety_penalty_side(const Position& pos, Color us) {
     return KING_SAFETY_TABLE[units];
 }
 
-// Bound on the total swing the non-lazy terms (mobility + pawn structure
-// + bishop pair + king safety) can contribute. Mobility ~200 cp,
-// pawn structure ~200 cp, bishop pair ~50 cp, king safety hard-caps at
-// 500 cp per side (so up to ±500 cp swing to the diff). 1000 cp is a
-// safe upper bound; lazy triggers only when material + PST alone is
-// already unambiguously outside the alpha-beta window even after the
-// remaining terms fire.
-constexpr int EVAL_LAZY_MARGIN = 1000;
+// --- Pawn shield --------------------------------------------------------
+// Bonus/penalty for pawns directly in front of a castled king. Only
+// meaningful when the king has actually castled (wing files A-C or F-H
+// and on its home rank); a central-file or advanced king is scored by
+// mobility / king PST instead. For each of the three files near the
+// king (king_file - 1, king_file, king_file + 1), find the nearest
+// friendly pawn moving toward the enemy: pawn one rank forward = full
+// shield bonus, two ranks = partial, three = trace, none = missing
+// penalty. Applied to the middlegame term only — an active endgame
+// king shouldn't be trying to hide behind pawns.
+//
+// The shield term does NOT participate in the king safety attack
+// arithmetic (weights, table) — pawn shield is a positional feature
+// of the king's placement, independent of specific attackers. In a
+// good real position both fire; they compose additively.
+static constexpr int SHIELD_BONUS[3]         = { 15, 8, 2 };  // distance 1, 2, 3
+static constexpr int SHIELD_MISSING_PENALTY  = 12;
+
+static int pawn_shield_side(const Position& pos, Color us) {
+    const Bitboard king_bb   = pos.pieces[us][KING];
+    if (king_bb == 0U) {
+        return 0;
+    }
+    const Bitboard our_pawns = pos.pieces[us][PAWN];
+    // Pawnless positions (tactical test setups, endgames with all pawns
+    // traded) aren't meaningfully described by a "shield" concept. Skip
+    // to avoid pathological huge penalties on artificial positions.
+    if (popcount(our_pawns) < 3) {
+        return 0;
+    }
+    const Square king_sq   = lsb(king_bb);
+    const int    king_file = file_of(king_sq);
+    const int    king_rank = rank_of(king_sq);
+
+    // Central-file king (D/E) has no meaningful shield concept — score
+    // via king PST and mobility only. Off-home-rank king (advanced,
+    // uncastled) similarly.
+    if (king_file >= FILE_D && king_file <= FILE_E) {
+        return 0;
+    }
+    const int home_rank = (us == WHITE) ? int(RANK_1) : int(RANK_8);
+    if (king_rank != home_rank) {
+        return 0;
+    }
+
+    int score = 0;
+    for (int df = -1; df <= 1; ++df) {
+        const int f = king_file + df;
+        if (f < 0 || f > 7) {
+            continue;
+        }
+        // Scan king's forward direction for the nearest own pawn on
+        // this file. Distance = ranks between king and the pawn (1 =
+        // right in front, 3 = still shielding but advanced).
+        int distance = 0;
+        for (int d = 1; d <= 3; ++d) {
+            const int r = (us == WHITE) ? (home_rank + d) : (home_rank - d);
+            const Square s = make_square(File(f), Rank(r));
+            if ((our_pawns & square_bb(s)) != 0U) {
+                distance = d;
+                break;
+            }
+        }
+        if (distance == 0) {
+            score -= SHIELD_MISSING_PENALTY;
+        } else {
+            score += SHIELD_BONUS[distance - 1];
+        }
+    }
+    return score;
+}
+
+// Bound on the total swing the non-lazy terms can contribute:
+// mobility ~200, pawn structure ~200, bishop pair ~50, king safety
+// caps at ±500, pawn shield caps at ±(3 * max(BONUS,MISSING)) = ±45.
+// 1200 cp comfortably covers the combined worst case; lazy triggers
+// only when material + PST alone is already unambiguously outside the
+// alpha-beta window even after the remaining terms fire.
+constexpr int EVAL_LAZY_MARGIN = 1200;
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — alpha/beta is standard evaluation-window naming, swapping would be caught by the assertion `alpha <= beta` at the top of the search loop.
 int evaluate(const Position& pos, int alpha, int beta) {
@@ -506,6 +577,14 @@ int evaluate(const Position& pos, int alpha, int beta) {
     // queen (see king_safety_penalty_side).
     mg_diff += king_safety_penalty_side(pos, BLACK) -
                king_safety_penalty_side(pos, WHITE);
+
+    // Pawn shield — positive for a well-defended castled king. WHITE's
+    // shield bonus is good for white → adds to the WHITE-BLACK diff.
+    // BLACK's shield bonus is good for black → subtracts. Composes
+    // additively with king safety (attack pressure vs. structural
+    // shelter — different signals).
+    mg_diff += pawn_shield_side(pos, WHITE) -
+               pawn_shield_side(pos, BLACK);
 
     int score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
