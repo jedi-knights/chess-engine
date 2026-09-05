@@ -81,6 +81,23 @@ struct SearchContext {
     // signal below killers and above losing captures — a good response
     // to a specific opponent move often repeats in similar contexts.
     Move countermove[NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES] = {};
+
+    // Static-eval stack indexed by ply — used to detect the "improving"
+    // trend (our eval this turn better than our eval two plies ago).
+    // Populated at the RFP/razoring block only for non-check non-mate
+    // nodes; in-check / mate-window entries reset to EVAL_STACK_NONE.
+    // Same-color plies (ply and ply-2) are directly comparable since
+    // evaluate() returns from side-to-move perspective. Constructor
+    // fills with the sentinel so default-zero doesn't get mistaken for
+    // "eval was 0" (which is a valid real eval in symmetric endgames).
+    static constexpr int EVAL_STACK_NONE = -2'000'000;
+    int eval_stack[MAX_PLY];
+
+    SearchContext() {
+        for (int& e : eval_stack) {
+            e = EVAL_STACK_NONE;
+        }
+    }
 };
 
 // Ceiling on any single (side, piece, dest) history slot. Sits well
@@ -541,10 +558,24 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     //   Razoring: if we're WAY below alpha at very shallow depth, hand
     //   off to qsearch and if even qsearch (which sees captures) can't
     //   pull us back to alpha, return that as an upper bound.
+    //
+    // The `se` computed here also seeds the `improving` flag used by LMR
+    // further down — a modern engine's "position getting better this turn
+    // than last turn?" heuristic. When not improving, LMR reduces one
+    // extra ply since our line is degrading anyway.
+    bool improving = false;
     if (!node_in_check
         && std::abs(beta)  < MATE_SCORE - 1000
         && std::abs(alpha) < MATE_SCORE - 1000) {
         int se = evaluate(pos, alpha, beta);
+
+        if (ply < MAX_PLY) {
+            ctx.eval_stack[ply] = se;
+            if (ply >= 2 &&
+                ctx.eval_stack[ply - 2] != SearchContext::EVAL_STACK_NONE) {
+                improving = se > ctx.eval_stack[ply - 2];
+            }
+        }
 
         constexpr int RFP_MARGIN   = 80;    // cp per depth ply
         constexpr int RAZOR_MARGIN = 200;   // cp
@@ -558,6 +589,11 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                 return qs;
             }
         }
+    } else if (ply < MAX_PLY) {
+        // In check or mate window — no static eval available. Reset the
+        // slot so a future ply+2 improving check doesn't compare against
+        // stale data left by a sibling recursion at this ply.
+        ctx.eval_stack[ply] = SearchContext::EVAL_STACK_NONE;
     }
 
     // Null-move pruning: at non-PV interior nodes with sufficient
@@ -679,10 +715,17 @@ int negamax(Position& pos, int depth, int alpha, int beta,
             if (can_reduce) {
                 const int d_idx  = std::min(depth,   LMR_MAX_DEPTH - 1);
                 const int mn_idx = std::min(i + 1,   LMR_MAX_MOVES - 1);
+                reduction = LMR_TABLE[d_idx][mn_idx];
+                // Improving discount: our eval is dropping since the
+                // last time we moved, so late quiet moves are even less
+                // likely to change the outcome — cut an extra ply.
+                if (!improving) {
+                    reduction += 1;
+                }
                 // Clamp so `depth - 1 - reduction >= 0` — over-reducing
                 // past qsearch buys nothing and can misread borderline
                 // tactical lines that a 1-ply search would catch.
-                reduction = std::min(LMR_TABLE[d_idx][mn_idx], depth - 1);
+                reduction = std::min(reduction, depth - 1);
             }
             score = -negamax(pos, depth - 1 - reduction,
                              -alpha - 1, -alpha, ply + 1, m, ctx);
