@@ -423,7 +423,7 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     const bool checked = in_check(pos);
 
     if (!checked) {
-        int stand_pat = evaluate(pos);
+        int stand_pat = evaluate(pos, alpha, beta);
         if (stand_pat >= beta) {
             return beta;
         }
@@ -544,7 +544,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     if (!node_in_check
         && std::abs(beta)  < MATE_SCORE - 1000
         && std::abs(alpha) < MATE_SCORE - 1000) {
-        int se = evaluate(pos);
+        int se = evaluate(pos, alpha, beta);
 
         constexpr int RFP_MARGIN   = 80;    // cp per depth ply
         constexpr int RAZOR_MARGIN = 200;   // cp
