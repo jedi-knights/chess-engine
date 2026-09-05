@@ -722,10 +722,19 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                 if (!improving) {
                     reduction += 1;
                 }
+                // PV-node discount: at genuine PV nodes (non-null
+                // window, beta > alpha + 1) the moves matter more —
+                // give one ply back so we search the actual PV lines
+                // more accurately and pay less re-search cost.
+                if (beta - alpha > 1) {
+                    reduction -= 1;
+                }
                 // Clamp so `depth - 1 - reduction >= 0` — over-reducing
                 // past qsearch buys nothing and can misread borderline
-                // tactical lines that a 1-ply search would catch.
-                reduction = std::min(reduction, depth - 1);
+                // tactical lines that a 1-ply search would catch. Also
+                // clamp low so PV discount can't push us to a NEGATIVE
+                // reduction (that would extend, not reduce).
+                reduction = std::clamp(reduction, 0, depth - 1);
             }
             score = -negamax(pos, depth - 1 - reduction,
                              -alpha - 1, -alpha, ply + 1, m, ctx);
