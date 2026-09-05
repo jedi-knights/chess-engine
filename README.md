@@ -10,7 +10,14 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
 ![Status](https://img.shields.io/badge/status-early--development-orange.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Overview](#overview) · [Install](#installation) · [Usage](#usage) · [Examples](#examples) · [Development](#development) · [Contributing](#contributing)
+<p align="center">
+  <a href="#overview">Overview</a> ·
+  <a href="#installation">Install</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#examples">Examples</a> ·
+  <a href="#development">Development</a> ·
+  <a href="#contributing">Contributing</a>
+</p>
 
 ## Overview
 
