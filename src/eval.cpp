@@ -174,18 +174,20 @@ static constexpr Bitboard ADJACENT_FILE_MASK[8] = {
 static constexpr int PASSED_MG[8] = { 0,  5, 10, 20, 35, 60, 90, 0 };
 static constexpr int PASSED_EG[8] = { 0, 10, 25, 45, 75, 120, 200, 0 };
 
-// Isolated pawn penalty: no friendly pawn on adjacent files. Standard
-// starter values from the Chess Programming Wiki — isolated pawns are
-// harder to defend and easier to blockade, worse in the endgame where
-// the piece cover thins out.
-static constexpr int ISOLATED_MG = -15;
-static constexpr int ISOLATED_EG = -20;
+// Isolated / doubled pawn penalties. Concrete values live in
+// eval::params (see eval.h) so the tuner can adjust them; defaults
+// preserve the original constexpr literals.
+//
+// Isolated pawn: no friendly pawn on adjacent files. Harder to defend
+// and easier to blockade; worse in the endgame where piece cover thins.
+//
+// Doubled pawn: applied per EXTRA pawn on a file (two → one penalty,
+// three → two, etc.). Doubled pawns block each other and can't defend
+// each other diagonally.
 
-// Doubled pawn penalty: applied per EXTRA pawn on a file (two pawns
-// stacked → one penalty, three → two, etc.). Doubled pawns block each
-// other and can't defend each other diagonally.
-static constexpr int DOUBLED_MG = -10;
-static constexpr int DOUBLED_EG = -20;
+namespace eval {
+TuningParams params;
+}  // namespace eval
 
 namespace eval {
 void init() {
@@ -224,8 +226,8 @@ static void pawn_structure_side(const Position& pos, Color us,
     for (int f = 0; f < 8; ++f) {
         int count = popcount(PAWN_FILE_MASK[f] & our_pawns);
         if (count > 1) {
-            mg += DOUBLED_MG * (count - 1);
-            eg += DOUBLED_EG * (count - 1);
+            mg += eval::params.doubled_mg * (count - 1);
+            eg += eval::params.doubled_eg * (count - 1);
         }
     }
 
@@ -233,8 +235,8 @@ static void pawn_structure_side(const Position& pos, Color us,
     while (b != 0U) {
         Square s = pop_lsb(b);
         if ((ADJACENT_FILE_MASK[file_of(s)] & our_pawns) == 0) {
-            mg += ISOLATED_MG;
-            eg += ISOLATED_EG;
+            mg += eval::params.isolated_mg;
+            eg += eval::params.isolated_eg;
         }
         if ((PASSED_PAWN_MASK[us][s] & enemy_pawns) == 0) {
             int adv = (us == WHITE) ? (rank_of(s) - 1) : (6 - rank_of(s));
@@ -294,25 +296,16 @@ static void pawn_structure_eval(const Position& pos,
 
 // --- Bishop pair --------------------------------------------------------
 // Two bishops are worth more than the sum of the parts — they cover both
-// color complexes together, so tactical possibilities compound. Standard
-// engine bonus is ~30 cp MG, ~50 cp EG (endgame value is higher because
-// open positions give bishops more scope). Guards on "at least two"
-// rather than "exactly two" so promotions to bishop still count, though
-// two same-color bishops after underpromotion is a rare degenerate case.
-constexpr int BISHOP_PAIR_MG = 30;
-constexpr int BISHOP_PAIR_EG = 50;
-
-// --- Mobility -----------------------------------------------------------
-// Cheap and effective: count squares each piece can move to, minus own
-// pieces AND enemy pawn attack squares ("safe mobility"). Excluding
-// pawn-attacked squares is standard — a knight on a square a pawn can
-// hit is not really mobile there, it'll get traded off. Different
-// weights per piece type reflect diminishing returns (queens usually
-// have plenty of mobility regardless).
-static constexpr int MOB_KNIGHT = 4;
-static constexpr int MOB_BISHOP = 3;
-static constexpr int MOB_ROOK   = 2;
-static constexpr int MOB_QUEEN  = 1;
+// color complexes together, so tactical possibilities compound.
+// Concrete values live in eval::params (bishop_pair_mg / _eg).
+//
+// --- Mobility ----------------------------------------------------------
+// Count squares each piece can move to, minus own pieces AND enemy pawn
+// attack squares ("safe mobility"). Excluding pawn-attacked squares is
+// standard — a knight on a square a pawn can hit is not really mobile
+// there. Different weights per piece type reflect diminishing returns
+// (queens usually have plenty of mobility regardless). Concrete weights
+// live in eval::params (mob_knight, mob_bishop, mob_rook, mob_queen).
 
 // Local file masks — same as movegen's file-local constants, duplicated
 // here to keep bitboard.h lean. Only pawn attack computation needs them.
@@ -338,16 +331,16 @@ static int mobility(const Position& pos, Color us) {
 
     Bitboard b = pos.pieces[us][KNIGHT];
     while (b != 0U) { Square s = pop_lsb(b);
-                score += MOB_KNIGHT * popcount(KNIGHT_ATTACKS[s] & mask); }
+                score += eval::params.mob_knight * popcount(KNIGHT_ATTACKS[s] & mask); }
     b = pos.pieces[us][BISHOP];
     while (b != 0U) { Square s = pop_lsb(b);
-                score += MOB_BISHOP * popcount(bishop_attacks(s, occ) & mask); }
+                score += eval::params.mob_bishop * popcount(bishop_attacks(s, occ) & mask); }
     b = pos.pieces[us][ROOK];
     while (b != 0U) { Square s = pop_lsb(b);
-                score += MOB_ROOK   * popcount(rook_attacks(s, occ)   & mask); }
+                score += eval::params.mob_rook   * popcount(rook_attacks(s, occ)   & mask); }
     b = pos.pieces[us][QUEEN];
     while (b != 0U) { Square s = pop_lsb(b);
-                score += MOB_QUEEN  * popcount(
+                score += eval::params.mob_queen  * popcount(
                     (bishop_attacks(s, occ) | rook_attacks(s, occ)) & mask); }
 
     return score;
@@ -462,8 +455,8 @@ static int king_safety_penalty_side(const Position& pos, Color us) {
 // arithmetic (weights, table) — pawn shield is a positional feature
 // of the king's placement, independent of specific attackers. In a
 // good real position both fire; they compose additively.
-static constexpr int SHIELD_BONUS[3]         = { 15, 8, 2 };  // distance 1, 2, 3
-static constexpr int SHIELD_MISSING_PENALTY  = 12;
+static constexpr int SHIELD_BONUS[3] = { 15, 8, 2 };  // distance 1, 2, 3
+// SHIELD_MISSING_PENALTY lives in eval::params for tuning.
 
 static int pawn_shield_side(const Position& pos, Color us) {
     const Bitboard king_bb   = pos.pieces[us][KING];
@@ -511,7 +504,7 @@ static int pawn_shield_side(const Position& pos, Color us) {
             }
         }
         if (distance == 0) {
-            score -= SHIELD_MISSING_PENALTY;
+            score -= eval::params.shield_missing_penalty;
         } else {
             score += SHIELD_BONUS[distance - 1];
         }
@@ -598,8 +591,8 @@ static int pawn_storm_penalty_side(const Position& pos, Color us) {
 //                far from our king → moderate penalty.
 // A file where we have a pawn is fine — our pawn blocks the line
 // regardless of what the enemy has.
-static constexpr int KING_OPEN_FILE_PENALTY      = 30;
-static constexpr int KING_SEMI_OPEN_FILE_PENALTY = 15;
+// KING_OPEN_FILE_PENALTY and KING_SEMI_OPEN_FILE_PENALTY live in
+// eval::params for tuning; defaults 30 / 15 preserve prior behavior.
 
 static int king_open_file_penalty_side(const Position& pos, Color us) {
     const Bitboard king_bb = pos.pieces[us][KING];
@@ -637,8 +630,8 @@ static int king_open_file_penalty_side(const Position& pos, Color us) {
     const Bitboard their_on_file = pos.pieces[them][PAWN] & PAWN_FILE_MASK[king_file];
 
     if (our_on_file == 0U) {
-        return (their_on_file == 0U) ? KING_OPEN_FILE_PENALTY
-                                     : KING_SEMI_OPEN_FILE_PENALTY;
+        return (their_on_file == 0U) ? eval::params.king_open_file_penalty
+                                     : eval::params.king_semi_open_file_penalty;
     }
     return 0;
 }
@@ -685,12 +678,12 @@ int evaluate(const Position& pos, int alpha, int beta) {
 
     // Bishop pair — flat bonus per side with two or more bishops.
     if (popcount(pos.pieces[WHITE][BISHOP]) >= 2) {
-        mg_diff += BISHOP_PAIR_MG;
-        eg_diff += BISHOP_PAIR_EG;
+        mg_diff += eval::params.bishop_pair_mg;
+        eg_diff += eval::params.bishop_pair_eg;
     }
     if (popcount(pos.pieces[BLACK][BISHOP]) >= 2) {
-        mg_diff -= BISHOP_PAIR_MG;
-        eg_diff -= BISHOP_PAIR_EG;
+        mg_diff -= eval::params.bishop_pair_mg;
+        eg_diff -= eval::params.bishop_pair_eg;
     }
 
     // King safety — penalty for each side's king under attack, applied
