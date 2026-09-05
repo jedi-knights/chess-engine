@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <vector>
 
@@ -105,6 +106,42 @@ constexpr int LMP_LIMIT[LMP_MAX_DEPTH + 1] = {0, 4, 8, 12};
 // ordering was going to make full depth inefficient anyway. Used by
 // modern Stockfish/Ethereal in preference to IID.
 constexpr int IIR_MIN_DEPTH = 4;
+
+// Log-based Late Move Reduction table indexed by (depth, 1-indexed
+// move number). Formula `int(0.75 + log(d) * log(mn) / 2.25)` grows
+// smoothly with both depth and move index — later moves at deep nodes
+// contribute the least to the eval so they can be safely searched with
+// larger reductions, while early moves at shallow nodes stay at or
+// near their real depth. The re-search on fail-high protects tactical
+// moves a reduced probe would miss (see PVS + re-search in negamax).
+//
+// Concrete values:
+//   d=3,  mn=2  → 1     (was 1 with old (i>=12 ? 2 : 1) step)
+//   d=3,  mn=12 → 1     (was 2 with old step — old was too aggressive here)
+//   d=10, mn=12 → 3     (was 2 — old was too gentle at deep nodes)
+//   d=15, mn=30 → 4     (was 2 — big new reduction at deep late moves)
+//
+// 64x256 is small (16 KB, fits in L1) and comfortably above any
+// realistic (depth, move-count) pair the search would ask for.
+constexpr int LMR_MAX_DEPTH = 64;
+constexpr int LMR_MAX_MOVES = 256;
+static int LMR_TABLE[LMR_MAX_DEPTH][LMR_MAX_MOVES];
+
+// Populated at static init — runs once before main(). LMR_TABLE and
+// this initializer live in the same translation unit, so declaration
+// order guarantees LMR_TABLE is zero-initialized before this fires.
+// No caller reads LMR_TABLE before static init completes (the search
+// only runs at runtime via uci_loop or search_iterative), so this is
+// SIOF-safe.
+[[maybe_unused]] static const bool LMR_TABLE_READY = [] {
+    for (int d = 1; d < LMR_MAX_DEPTH; ++d) {
+        for (int mn = 1; mn < LMR_MAX_MOVES; ++mn) {
+            LMR_TABLE[d][mn] = static_cast<int>(
+                0.75 + std::log(d) * std::log(mn) / 2.25);
+        }
+    }
+    return true;
+}();
 
 // Poll for cancellation reasons every ~1024 nodes. Both the wall-clock
 // deadline and the external `stop` flag use this cadence; on every-node
@@ -640,7 +677,12 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                                   && !node_in_check;
             int reduction = 0;
             if (can_reduce) {
-                reduction = (i >= 12) ? 2 : 1;
+                const int d_idx  = std::min(depth,   LMR_MAX_DEPTH - 1);
+                const int mn_idx = std::min(i + 1,   LMR_MAX_MOVES - 1);
+                // Clamp so `depth - 1 - reduction >= 0` — over-reducing
+                // past qsearch buys nothing and can misread borderline
+                // tactical lines that a 1-ply search would catch.
+                reduction = std::min(LMR_TABLE[d_idx][mn_idx], depth - 1);
             }
             score = -negamax(pos, depth - 1 - reduction,
                              -alpha - 1, -alpha, ply + 1, m, ctx);
