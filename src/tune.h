@@ -8,8 +8,12 @@
 // weights to minimize mean-squared prediction error.
 //
 // A 30-position demo dataset is checked in at tests/data/tune_demo.txt
-// for CI; for real tuning, fetch Zurichess quiet-labeled (or a similar
-// EPD corpus) via `scripts/fetch_tuning_dataset.py`.
+// for CI; for real tuning, either fetch a public labeled corpus via
+// `scripts/fetch_tuning_dataset.py` (Zurichess quiet-labeled and
+// friends) or generate one from self-play via
+// `scripts/gen_selfplay_data.py` — the latter is the fallback when
+// no public dataset fits, e.g. after a big eval change where the
+// engine's play-style has drifted from what published corpora reflect.
 //
 // Modes:
 //   scalar (default) — coordinate descent over eval::params (13 scalar
