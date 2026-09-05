@@ -519,12 +519,75 @@ static int pawn_shield_side(const Position& pos, Color us) {
     return score;
 }
 
+// --- Pawn storm ---------------------------------------------------------
+// Penalty for enemy pawns advancing toward our castled king. Same file
+// scan as pawn shield: for each of the 3 files near the king (king's
+// file ± 1), find the nearest enemy pawn moving in the enemy's forward
+// direction and score by how close it is to our king rank. Only nearest
+// counts — a pawn at distance 2 subsumes anything at distance 3 on the
+// same file. Same castling / pawnless gates as pawn shield. MG-only.
+//
+// Storm and shield capture different questions about the king's safety:
+//   shield  = am I sheltered now?
+//   storm   = how quickly will that shelter dissolve?
+// A castled king with intact shield but a fast enemy storm is losing
+// its shelter within a few moves; conversely, a broken shield with no
+// enemy pawn advance is a permanent weakness the engine should still
+// prefer to avoid but not panic over. Both terms compose additively.
+static constexpr int STORM_PENALTY[4] = { 30, 20, 10, 3 };  // distance 1..4
+
+static int pawn_storm_penalty_side(const Position& pos, Color us) {
+    const Bitboard king_bb = pos.pieces[us][KING];
+    if (king_bb == 0U) {
+        return 0;
+    }
+    const Color    them        = Color(us ^ 1);
+    const Bitboard enemy_pawns = pos.pieces[them][PAWN];
+    if (popcount(enemy_pawns) < 3) {
+        return 0;
+    }
+    const Square king_sq   = lsb(king_bb);
+    const int    king_file = file_of(king_sq);
+    const int    king_rank = rank_of(king_sq);
+
+    // Same gates as pawn shield: only castled kings (wing file, home
+    // rank) have a "kingside" or "queenside" for a storm to hit.
+    if (king_file >= FILE_D && king_file <= FILE_E) {
+        return 0;
+    }
+    const int home_rank = (us == WHITE) ? int(RANK_1) : int(RANK_8);
+    if (king_rank != home_rank) {
+        return 0;
+    }
+
+    int penalty = 0;
+    for (int df = -1; df <= 1; ++df) {
+        const int f = king_file + df;
+        if (f < 0 || f > 7) {
+            continue;
+        }
+        // Scan enemy pawns approaching our king. For a white king at
+        // rank 1 we iterate ranks 2, 3, 4, 5 looking for a black pawn.
+        // For a black king at rank 8 we iterate ranks 7, 6, 5, 4.
+        for (int d = 1; d <= 4; ++d) {
+            const int r = (us == WHITE) ? (home_rank + d) : (home_rank - d);
+            const Square s = make_square(File(f), Rank(r));
+            if ((enemy_pawns & square_bb(s)) != 0U) {
+                penalty += STORM_PENALTY[d - 1];
+                break;
+            }
+        }
+    }
+    return penalty;
+}
+
 // Bound on the total swing the non-lazy terms can contribute:
 // mobility ~200, pawn structure ~200, bishop pair ~50, king safety
-// caps at ±500, pawn shield caps at ±(3 * max(BONUS,MISSING)) = ±45.
-// 1200 cp comfortably covers the combined worst case; lazy triggers
-// only when material + PST alone is already unambiguously outside the
-// alpha-beta window even after the remaining terms fire.
+// caps at ±500, pawn shield caps at ±(3 * max(BONUS,MISSING)) = ±45,
+// pawn storm caps at ±(3 * STORM_PENALTY[0]) = ±90. 1200 cp comfortably
+// covers the combined worst case (~1135); lazy triggers only when
+// material + PST alone is already unambiguously outside the alpha-beta
+// window even after the remaining terms fire.
 constexpr int EVAL_LAZY_MARGIN = 1200;
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — alpha/beta is standard evaluation-window naming, swapping would be caught by the assertion `alpha <= beta` at the top of the search loop.
@@ -585,6 +648,13 @@ int evaluate(const Position& pos, int alpha, int beta) {
     // shelter — different signals).
     mg_diff += pawn_shield_side(pos, WHITE) -
                pawn_shield_side(pos, BLACK);
+
+    // Pawn storm — penalty for enemy pawns advancing at our king.
+    // A high WHITE penalty means black's pawns are storming us →
+    // bad for white → subtract from WHITE-BLACK diff. Equivalently,
+    // add black's penalty and subtract white's.
+    mg_diff += pawn_storm_penalty_side(pos, BLACK) -
+               pawn_storm_penalty_side(pos, WHITE);
 
     int score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
