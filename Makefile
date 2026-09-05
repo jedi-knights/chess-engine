@@ -1,6 +1,10 @@
 CXX      := clang++
-CXXFLAGS := -std=c++20 -O3 -march=native -Wall -Wextra -Wpedantic -pipe
-LDFLAGS  :=
+# -flto enables link-time cross-file inlining and dead-code elimination.
+# For a small codebase like this one it lets the linker inline hot leaf
+# functions (magic-bitboard lookups, tt().prefetch, is_capture, etc.)
+# across translation-unit boundaries where the compiler couldn't see them.
+CXXFLAGS := -std=c++20 -O3 -march=native -flto -Wall -Wextra -Wpedantic -pipe
+LDFLAGS  := -flto
 TARGET   := engine
 SRCDIR   := src
 TESTDIR  := tests
