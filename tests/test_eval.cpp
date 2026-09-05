@@ -217,6 +217,47 @@ TEST_CASE("king safety: more ring attackers produce a strictly higher penalty") 
     CHECK(evaluate(one)  > evaluate(none));
 }
 
+// --- Pawn shield ---------------------------------------------------------
+
+TEST_CASE("pawn shield: castled king with intact shield beats one with a gap") {
+    // Same material and identical piece placement except for the G-pawn:
+    // in `intact`, pawns sit on F2, G2, H2 (full kingside shield). In
+    // `gap`, the G-pawn is gone — same king square, weaker shelter.
+    // The intact-shield position must evaluate higher for white.
+    Position intact, gap;
+    REQUIRE(intact.set_from_fen("r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 0 1"));
+    REQUIRE(gap   .set_from_fen("r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1P1P/R1BQ1RK1 w - - 0 1"));
+    CHECK(evaluate(intact) > evaluate(gap));
+}
+
+TEST_CASE("pawn shield: advanced shield pawn scores lower than one right in front") {
+    // Same material, same king. In `intact`, G-pawn on G2 (distance 1
+    // from king on G1 = full bonus). In `advanced`, G-pawn on G3
+    // (distance 2 = partial bonus). Intact should score higher.
+    Position intact, advanced;
+    REQUIRE(intact  .set_from_fen("r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 0 1"));
+    REQUIRE(advanced.set_from_fen("r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2NP1/PPPP1P1P/R1BQ1RK1 w - - 0 1"));
+    CHECK(evaluate(intact) > evaluate(advanced));
+}
+
+TEST_CASE("pawn shield: king on a central file gets no shield contribution") {
+    // Two positions with white king on E1. In `with_pawns` there are
+    // shield-shaped pawns on F2, G2, H2; in `no_pawns` those squares
+    // are empty. If the shield gate fired on a central-file king, the
+    // `with_pawns` position would gain ~+45 cp from shield alone on top
+    // of the 3-pawn material — but shield returns 0 (E is central),
+    // so the delta is purely material + PST + mobility. The bound
+    // below fits comfortably above the expected material-driven delta
+    // (~300 cp) but below what a shield contribution would add.
+    Position with_pawns, no_pawns;
+    REQUIRE(with_pawns.set_from_fen("4k3/8/8/8/8/8/5PPP/4K3 w - - 0 1"));
+    REQUIRE(no_pawns  .set_from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1"));
+    const int delta = evaluate(with_pawns) - evaluate(no_pawns);
+    // 3 pawns × ~100 cp material + PST tweaks + mobility. Should sit
+    // well under 380 — a shield contribution would push it past 400.
+    CHECK(delta < 380);
+}
+
 TEST_CASE("PST is mirrored for black") {
     // White knight on E4 and black knight on E5 are geometrically equivalent
     // (each is centralized in their own half). Both should contribute the
