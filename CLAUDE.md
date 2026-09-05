@@ -87,6 +87,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ Precomputed enemy attacks for king-move legality. `movegen::attacks_by` computes the full enemy-attack bitboard once per node (with own king removed from occupancy so sliders see through); non-capture king moves check legality with one AND instead of make/unmake+is_square_attacked. Captures + castling still fall back to full is_legal.
 - ✅ Full PV extraction. After each iteration, `build_pv` walks the TT from the post-bestmove position (bounded by depth, cycle-guarded, verified against generate_moves at each hop) and stores the line in `SearchResult::pv`. UCI info lines now emit the full PV plus `nps` and `time`.
 - ✅ Cmd_position mid-search warning. Sending `position` during an active `go infinite` without a preceding `stop` used to silently cancel the search; now emits an `info string` first so the GUI bug is visible.
+- ✅ Late Move Pruning (LMP). At non-check nodes with `depth <= 3` and a non-mate best-so-far, skip quiet moves once `quiets_searched >= LMP_LIMIT[depth]` (`{4, 8, 12}`). Captures, promotions, killers, and TT moves are unaffected — the pruning fires only on low-history quiets past the threshold. Startpos depth 10 drops from 301,533 → 116,327 nodes (~61% cut); Kiwipete depth 10 drops from 717,590 → 586,283 nodes (~18% cut).
 
 ## Search / eval performance stack
 
@@ -106,6 +107,8 @@ Startpos depth 8 (release, -O3 -march=native), each row adds on top of the previ
 Total: **3× search speedup, ~7× node reduction** on the depth-8 startpos benchmark. The node collapse comes almost entirely from LMR — reducing depth on late quiet moves prunes huge subtrees. Later phases (incremental eval, pin-aware) show as neutral on this benchmark because LMR + TT already dominated the runtime; both pay off on other workloads (pure perft shows ~26 % gain from pin-aware alone; eval gains from incremental will compound when more terms are added).
 
 **Grill round 2 additions** (post-milestone-8 stack above → after PVS + null-move + SEE + reverse futility + razoring + root PVS + king-move enemy-attack shortcut): startpos depth 8 drops from 198,183 nodes to **~54,700 nodes** — another ~3.6× cut on top of the earlier work. Depth 10 completes in ~27 ms / ~301k nodes with a full 10-ply PV.
+
+**LMP addition**: startpos depth 8 drops from 54,732 → 36,113 nodes (34%); depth 10 drops from 301,533 → 116,327 nodes (61%) in ~18 ms. Kiwipete depth 10 drops from 717,590 → 586,283 nodes (18%). The cut compounds with LMR — LMR reduces depth on late quiets, LMP skips them entirely once enough have been searched.
 
 Perft 5 (~200 M nodes across the 6 standard positions): 16.5 s → 12.2 s = ~26 % faster on pure movegen throughput (~16 M nodes/sec).
 

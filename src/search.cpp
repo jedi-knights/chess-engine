@@ -80,6 +80,16 @@ struct SearchContext {
 // TT > cap/promo > killers > losing cap/promo > history-quiets.
 constexpr int HISTORY_MAX = 16'000;
 
+// Late Move Pruning threshold table, indexed by depth. Once we've
+// searched this many quiet moves at a shallow non-check node without a
+// beta cutoff, the remaining quiets are highly unlikely to raise alpha
+// — skip them. Applies only at depth <= LMP_MAX_DEPTH; deeper nodes
+// still search every move. Numbers follow the Ethereal-style default
+// curve (grow quadratically-ish with depth so d=3 still tries a
+// generous slice before pruning).
+constexpr int LMP_MAX_DEPTH = 3;
+constexpr int LMP_LIMIT[LMP_MAX_DEPTH + 1] = {0, 4, 8, 12};
+
 // Poll for cancellation reasons every ~1024 nodes. Both the wall-clock
 // deadline and the external `stop` flag use this cadence; on every-node
 // checks the syscall/atomic-load overhead would dominate the search on
@@ -535,12 +545,25 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     const int original_alpha = alpha;
     int  best      = -INF;
     Move best_move = NULL_MOVE;
+    int  quiets_searched = 0;
     for (int i = 0; i < moves.size(); ++i) {
         pick_move_to_front(moves, scores, i);
         Move m = moves[i];
 
         const bool is_cap    = is_capture(pos, m);
         const bool is_promo  = move_type(m) == MT_PROMOTION;
+
+        // Late Move Pruning: at shallow non-check nodes with a non-mate
+        // best-so-far, skip quiet moves once we've searched enough of
+        // them without a cutoff. The mate guard prevents pruning while
+        // we still need to find the escape from a losing line.
+        if (depth <= LMP_MAX_DEPTH
+            && !node_in_check
+            && !is_cap && !is_promo
+            && best > -MATE_SCORE + 1000
+            && quiets_searched >= LMP_LIMIT[depth]) {
+            continue;
+        }
 
         UndoInfo u;
         pos.make_move(m, u);
@@ -580,6 +603,9 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         pos.unmake_move(m, u);
         if (ctx.stopped) {
             return 0;                // bubble up cancellation
+        }
+        if (!is_cap && !is_promo) {
+            ++quiets_searched;
         }
         if (score > best)  { best = score; best_move = m; }
         alpha = std::max(alpha, score);
