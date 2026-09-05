@@ -20,6 +20,7 @@ struct UndoInfo {
     Square   ep_square      = NO_SQUARE;
     int      halfmove_clock = 0;
     uint64_t key            = 0;          // Zobrist key snapshot for unmake
+    uint64_t pawn_key       = 0;          // pawn-only Zobrist snapshot (for pawn hash)
 };
 
 struct Position {
@@ -34,6 +35,14 @@ struct Position {
     int      halfmove_clock  = 0;
     int      fullmove_number = 1;
     uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
+    // Pawn-only Zobrist: XOR of PIECE_SQ[color][PAWN][sq] over all pawns.
+    // Keys the pawn hash table in eval.cpp so pawn-structure terms
+    // (passed / isolated / doubled) get cached across positions that
+    // share the same pawn skeleton but differ elsewhere. Maintained
+    // incrementally in put_piece / remove_piece; snapshot-restored in
+    // unmake via UndoInfo. Excludes EP square (pawn structure eval
+    // doesn't depend on ep).
+    uint64_t pawn_key        = 0;
 
     // Incremental eval accumulators — sum of (material + PST) for every
     // piece on the board, per color. Maintained by put_piece / remove_piece

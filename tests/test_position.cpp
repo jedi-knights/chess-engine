@@ -5,7 +5,9 @@
 #include "doctest.h"
 #include "support.h"
 
+#include "bitboard.h"
 #include "position.h"
+#include "zobrist.h"
 
 #include <string>
 
@@ -173,5 +175,53 @@ TEST_CASE("unmake_move restores FEN for every special move type") {
 
         pos.unmake_move(c.m, u);
         CHECK(pos.to_fen() == before);          // unmake restores
+    }
+}
+
+TEST_CASE("pawn_key: matches recompute from pawn bitboards after every move type") {
+    // pawn_key is an XOR of PIECE_SQ[color][PAWN][sq] over all pawns.
+    // Recomputing from scratch after make/unmake at every special move
+    // type verifies the incremental updates in put_piece / remove_piece
+    // stay in sync with a full rebuild. Includes pawn captures,
+    // promotions (pawn removed at from + promoted piece placed at to),
+    // and non-pawn moves (pawn_key must be unchanged).
+    auto recompute_pawn_key = [](const Position& pos) {
+        uint64_t k = 0;
+        for (int c = 0; c < NUM_COLORS; ++c) {
+            Bitboard bb = pos.pieces[c][PAWN];
+            while (bb != 0U) {
+                Square s = pop_lsb(bb);
+                k ^= zobrist::PIECE_SQ[c][PAWN][s];
+            }
+        }
+        return k;
+    };
+
+    struct Case { const char* name; const char* fen; Move m; };
+    const Case cases[] = {
+        {"pawn double push",  STARTPOS_FEN, ::make_move(E2, E4)},
+        {"en passant",        "4k3/8/8/2pP4/8/8/8/4K3 w - c6 0 1",
+                              ::make_move(D5, C6, MT_EN_PASSANT)},
+        {"promotion",         "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+                              ::make_move(A7, A8, MT_PROMOTION, QUEEN)},
+        {"promotion capture", "1n2k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+                              ::make_move(A7, B8, MT_PROMOTION, QUEEN)},
+        {"pawn capture",      "4k3/8/8/2p5/3P4/8/8/4K3 w - - 0 1",
+                              ::make_move(D4, C5)},
+        {"knight move (no pawn change)", "4k3/8/8/8/8/8/PPPPPPPP/4K1N1 w - - 0 1",
+                              ::make_move(G1, F3)},
+    };
+    for (const auto& c : cases) {
+        Position pos;
+        REQUIRE(pos.set_from_fen(c.fen));
+        INFO("case: " << std::string(c.name));
+        CHECK(pos.pawn_key == recompute_pawn_key(pos));   // set_from_fen seeded correctly
+
+        UndoInfo u;
+        pos.make_move(c.m, u);
+        CHECK(pos.pawn_key == recompute_pawn_key(pos));   // incremental XOR is correct
+
+        pos.unmake_move(c.m, u);
+        CHECK(pos.pawn_key == recompute_pawn_key(pos));   // unmake snapshot restores
     }
 }

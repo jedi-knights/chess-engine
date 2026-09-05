@@ -49,7 +49,7 @@ TEST_CASE("piece values + PST contribution on a fixed square") {
         {"4k3/8/8/8/8/8/8/3RK3 w - - 0 1",  515, "rook   (500 +  5)"},
         {"4k3/8/8/8/8/8/8/3BK3 w - - 0 1",  330, "bishop (330 - 10)"},
         {"4k3/8/8/8/8/8/8/3NK3 w - - 0 1",  298, "knight (320 - 30)"},
-        {"4k3/8/8/8/8/8/3P4/4K3 w - - 0 1",  80, "pawn   (100 - 20)"},
+        {"4k3/8/8/8/8/8/3P4/4K3 w - - 0 1",  60, "pawn   (100 - 20, isolated)"},
     };
     for (const auto& c : cases) {
         Position pos;
@@ -62,11 +62,12 @@ TEST_CASE("piece values + PST contribution on a fixed square") {
 TEST_CASE("material differences aggregate linearly (with PST)") {
     // White has extra rook (+500 + PST_ROOK[D1]= +5) and extra pawn
     // (+100 + PST_PAWN[D2]= -20). Raw material+PST = 585. Rook on D1
-    // also gets 3 mobility squares (weight 2) blended by phase, taking
-    // the pinned total to 588.
+    // also gets 3 mobility squares (weight 2). The D2 pawn is isolated
+    // (no C or E pawn) — MG -15, EG -20. Phase 2/24, so the final
+    // blended total lands at 568.
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/3P4/3RK3 w - - 0 1"));
-    CHECK(evaluate(pos) == 588);
+    CHECK(evaluate(pos) == 568);
 }
 
 // --- PST-specific behaviors ---------------------------------------------
@@ -110,6 +111,51 @@ TEST_CASE("endgame: king in center scores higher than king in corner") {
     CHECK(evaluate(center) > evaluate(corner));
     // Delta = PST_KING_EG[E4] - PST_KING_EG[A1] = 40 - (-50) = 90.
     CHECK((evaluate(center) - evaluate(corner)) == 90);
+}
+
+// --- Pawn structure ------------------------------------------------------
+
+TEST_CASE("isolated pawn: same pawn count scores higher when the pawns support each other") {
+    // Both positions have two white pawns. In `connected` they sit on
+    // adjacent files (D2 + E2) — neither isolated. In `isolated_pair`
+    // they sit on files a gap apart (D2 + F2) — both isolated. Same
+    // material, only the isolated penalty differs.
+    Position connected, isolated_pair;
+    REQUIRE(connected    .set_from_fen("4k3/8/8/8/8/8/3PP3/4K3 w - - 0 1"));
+    REQUIRE(isolated_pair.set_from_fen("4k3/8/8/8/8/8/3P1P2/4K3 w - - 0 1"));
+    CHECK(evaluate(connected) > evaluate(isolated_pair));
+}
+
+TEST_CASE("doubled pawns: same pawn count scores lower when stacked on one file") {
+    // Both positions have two white pawns. In `abreast` they sit on
+    // D2 + E3 — adjacent files, supporting each other, one passed with
+    // an advancement bonus. In `doubled` they stack on D2 + D3 —
+    // isolated pair, plus a doubled-file penalty on top.
+    Position abreast, doubled;
+    REQUIRE(abreast.set_from_fen("4k3/8/8/8/8/4P3/3P4/4K3 w - - 0 1"));
+    REQUIRE(doubled.set_from_fen("4k3/8/8/8/8/3P4/3P4/4K3 w - - 0 1"));
+    CHECK(evaluate(abreast) > evaluate(doubled));
+}
+
+TEST_CASE("passed pawn: advanced pawn with no enemy pawn ahead scores higher than a blockaded one") {
+    // Both positions have one white pawn advanced to rank 5. In
+    // `passed` the file is clear. In `blocked` a black pawn sits on
+    // the same file directly ahead. The passed pawn is worth more.
+    Position passed, blocked;
+    REQUIRE(passed .set_from_fen("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1"));
+    REQUIRE(blocked.set_from_fen("4k3/3p4/8/3P4/8/8/8/4K3 w - - 0 1"));
+    CHECK(evaluate(passed) > evaluate(blocked));
+}
+
+TEST_CASE("pawn hash: repeat evaluate calls agree with fresh evaluate on the same position") {
+    // Sanity: cached path (second call, hash hit) returns the same
+    // score as the miss path (first call). Combined with startpos == 0
+    // above, this proves the hash isn't drifting.
+    Position pos;
+    REQUIRE(pos.set_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"));
+    int first  = evaluate(pos);
+    int second = evaluate(pos);
+    CHECK(first == second);
 }
 
 TEST_CASE("PST is mirrored for black") {
