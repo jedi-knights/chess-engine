@@ -24,7 +24,8 @@ src/                engine sources
   bitboard.[h|cpp]  popcount, lsb, pretty
   attacks.[h|cpp]   precomputed leaper attack tables (knight/king/pawn)
   position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo; incremental
-                    Zobrist + PSQ accumulators; repetition-key stack
+                    Zobrist + pawn-only Zobrist + PSQ accumulators;
+                    repetition-key stack
   movegen.[h|cpp]   generate_moves (legal moves) with pin-aware + enemy-attack
                     shortcuts + in_check helper
   perft.[h|cpp]     perft driver + 6-position standard suite
@@ -32,8 +33,10 @@ src/                engine sources
   zobrist.[h|cpp]   Zobrist keys + init + full-recompute reference; ep is
                     hashed only when the capture is pseudo-legal
   tt.[h|cpp]        transposition table (fixed-size direct-mapped, always-replace)
-  eval.[h|cpp]      material + PST + tapered eval + mobility + passed pawns
-                    + bishop pair (side-to-move perspective, incremental PSQ)
+  eval.[h|cpp]      material + PST + tapered eval + mobility + passed /
+                    isolated / doubled pawns (cached in a 16k-entry pawn
+                    hash by Position::pawn_key) + bishop pair
+                    (side-to-move perspective, incremental PSQ)
   search.[h|cpp]    iterative-deepening negamax with alpha-beta, TT, qsearch,
                     SEE-scored captures/promotions, PVS + null-window LMR,
                     null-move pruning, check extensions, reverse futility +
@@ -88,6 +91,7 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ Full PV extraction. After each iteration, `build_pv` walks the TT from the post-bestmove position (bounded by depth, cycle-guarded, verified against generate_moves at each hop) and stores the line in `SearchResult::pv`. UCI info lines now emit the full PV plus `nps` and `time`.
 - ✅ Cmd_position mid-search warning. Sending `position` during an active `go infinite` without a preceding `stop` used to silently cancel the search; now emits an `info string` first so the GUI bug is visible.
 - ✅ Late Move Pruning (LMP). At non-check nodes with `depth <= 3` and a non-mate best-so-far, skip quiet moves once `quiets_searched >= LMP_LIMIT[depth]` (`{4, 8, 12}`). Captures, promotions, killers, and TT moves are unaffected — the pruning fires only on low-history quiets past the threshold. Startpos depth 10 drops from 301,533 → 116,327 nodes (~61% cut); Kiwipete depth 10 drops from 717,590 → 586,283 nodes (~18% cut).
+- ✅ Pawn hash table + isolated / doubled pawn penalties. `Position::pawn_key` is an incremental XOR of `PIECE_SQ[color][PAWN][sq]` over all pawns, maintained by put_piece / remove_piece and snapshot-restored in unmake. The pawn hash (16k entries × 16 bytes = 256KB) caches the (mg, eg) diff of `pawn_structure_side` (passed + isolated + doubled combined). No clearing between games since pawn eval is a pure function of pawn placement. Isolated pawn penalty: -15 MG / -20 EG; doubled: -10 MG / -20 EG per extra pawn on file. Perf is roughly neutral on synthetic benchmarks (small savings on a cheap eval, offset by hash probe) — the real value is the new eval terms and the amortization path for future pawn terms (backward pawns, pawn chains, king shelter, storm/shelter).
 
 ## Search / eval performance stack
 
@@ -122,16 +126,16 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
     - `tests/test_bitboard.cpp` ↔ `src/bitboard.[h|cpp]`
     - `tests/test_attacks.cpp`  ↔ `src/attacks.[h|cpp]`
     - `tests/test_magic.cpp`    ↔ `src/magic.[h|cpp]`
-    - `tests/test_position.cpp` ↔ `src/position.[h|cpp]` (FEN + make/unmake forward-correctness + repetition)
+    - `tests/test_position.cpp` ↔ `src/position.[h|cpp]` (FEN + make/unmake forward-correctness + repetition + pawn_key round-trip)
     - `tests/test_movegen.cpp`  ↔ `src/movegen.[h|cpp]` (generator shape + movegen-driven make/unmake walks)
     - `tests/test_perft.cpp`    ↔ `src/perft.[h|cpp]`
     - `tests/test_zobrist.cpp`  ↔ `src/zobrist.[h|cpp]` (key round-trips + phantom-ep-hash regression)
     - `tests/test_tt.cpp`       ↔ `src/tt.[h|cpp]`
-    - `tests/test_eval.cpp`     ↔ `src/eval.[h|cpp]` (material + PST + mobility + passed pawn + bishop pair)
+    - `tests/test_eval.cpp`     ↔ `src/eval.[h|cpp]` (material + PST + mobility + passed / isolated / doubled pawns + bishop pair + pawn-hash consistency)
     - `tests/test_search.cpp`   ↔ `src/search.[h|cpp]` (negamax + qsearch + TT + SEE-promo regression)
     - `tests/test_notation.cpp` ↔ `src/notation.[h|cpp]` (UCI move round-trip)
     - `tests/test_uci.cpp`      ↔ `src/uci.[h|cpp]` (protocol via stringstream — `uci_loop` takes `std::istream&/std::ostream&` for exactly this reason; do not reintroduce `std::cin`/`std::cout` inside the loop)
-  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`. Current status: 144 test cases / 270k assertions passing under ASan + UBSan.
+  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`. Current status: 149 test cases / 270k assertions passing under ASan + UBSan.
 - `tests/test_main.cpp` uses `DOCTEST_CONFIG_IMPLEMENT` and provides `main()` — this is the single place where `init_attacks()`, `init_magic()`, `zobrist::init()`, and `eval::init()` are called, so per-TU static-init hacks are unnecessary.
 - Tests link the whole `src/` tree (except `main.cpp`) — see Makefile `$(TEST_SRCS)`.
 - Do not mock `Position` internals. Verify through `to_fen()` / public accessors.

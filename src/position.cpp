@@ -43,6 +43,7 @@ void Position::clear() {
     halfmove_clock  = 0;
     fullmove_number = 1;
     key             = 0;
+    pawn_key        = 0;
     psq_mg[WHITE] = psq_mg[BLACK] = 0;
     psq_eg[WHITE] = psq_eg[BLACK] = 0;
     history_size    = 0;
@@ -101,11 +102,12 @@ bool Position::set_from_fen(const std::string& fen) {
     key = zobrist::compute(*this);
 
     // set_from_fen writes bitboards directly rather than going through
-    // put_piece, so the incremental psq accumulators are still 0. Recompute
-    // from scratch — this only runs on set_from_fen / ucinewgame boundaries
-    // so it isn't in the search hot path.
+    // put_piece, so the incremental psq accumulators and pawn_key are
+    // still 0. Recompute from scratch — this only runs on set_from_fen /
+    // ucinewgame boundaries so it isn't in the search hot path.
     psq_mg[WHITE] = psq_mg[BLACK] = 0;
     psq_eg[WHITE] = psq_eg[BLACK] = 0;
+    pawn_key      = 0;
     for (int c = 0; c < NUM_COLORS; ++c) {
         for (int pt = PAWN; pt <= KING; ++pt) {
             Bitboard bb = pieces[c][pt];
@@ -113,6 +115,9 @@ bool Position::set_from_fen(const std::string& fen) {
                 Square s = pop_lsb(bb);
                 psq_mg[c] += eval::psq_mg(Color(c), PieceType(pt), s);
                 psq_eg[c] += eval::psq_eg(Color(c), PieceType(pt), s);
+                if (pt == PAWN) {
+                    pawn_key ^= zobrist::PIECE_SQ[c][PAWN][s];
+                }
             }
         }
     }
@@ -201,6 +206,9 @@ void Position::put_piece(Square s, Piece p) {
     colors[c]                   |= bb;
     occupied                    |= bb;
     key                         ^= zobrist::PIECE_SQ[c][pt][s];
+    if (pt == PAWN) {
+        pawn_key                ^= zobrist::PIECE_SQ[c][PAWN][s];
+    }
     psq_mg[c]                   += eval::psq_mg(c, pt, s);
     psq_eg[c]                   += eval::psq_eg(c, pt, s);
 }
@@ -216,6 +224,9 @@ void Position::remove_piece(Square s) {
     colors[c]                   &= ~bb;
     occupied                    &= ~bb;
     key                         ^= zobrist::PIECE_SQ[c][pt][s];
+    if (pt == PAWN) {
+        pawn_key                ^= zobrist::PIECE_SQ[c][PAWN][s];
+    }
     psq_mg[c]                   -= eval::psq_mg(c, pt, s);
     psq_eg[c]                   -= eval::psq_eg(c, pt, s);
 }
@@ -237,6 +248,7 @@ void Position::make_move(Move m, UndoInfo& u) {
     u.ep_square      = ep_square;
     u.halfmove_clock = halfmove_clock;
     u.key            = key;
+    u.pawn_key       = pawn_key;
     if (mt == MT_EN_PASSANT) {
         u.captured = Piece(us == WHITE ? B_PAWN : W_PAWN);
     } else {
@@ -384,8 +396,11 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
     halfmove_clock = u.halfmove_clock;
     // Snapshot restore beats redoing all the incremental XORs by hand —
     // and it's what tests check against (compute(pos) after unmake must
-    // equal the pre-move key).
+    // equal the pre-move key). Pawn key is fully rebuildable from the
+    // incremental XORs in put_piece / remove_piece, but the snapshot
+    // form is cheaper and matches how `key` is restored.
     key            = u.key;
+    pawn_key       = u.pawn_key;
     // Pop the repetition-history entry pushed by the matching make_move.
     if (history_size > 0) {
         --history_size;

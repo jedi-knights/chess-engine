@@ -139,11 +139,33 @@ static int compute_phase(const Position& pos) {
     return phase > PHASE_MAX ? PHASE_MAX : phase;
 }
 
-// --- Passed pawns -------------------------------------------------------
-// For each (color, square): bitboard of squares on the same file or an
-// adjacent file, on ranks IN FRONT of the pawn (from that color's
-// perspective). If no enemy pawns intersect, our pawn is passed.
+// --- Pawn structure ----------------------------------------------------
+// Passed pawn masks: for each (color, square), the bitboard of enemy
+// pawn squares that would prevent this pawn from being passed —
+// same file or an adjacent file, on any rank IN FRONT of the pawn.
 static Bitboard PASSED_PAWN_MASK[NUM_COLORS][NUM_SQUARES];
+
+// Per-file bitboards for doubled-pawn counting.
+static constexpr Bitboard PAWN_FILE_MASK[8] = {
+    0x0101010101010101ULL, 0x0202020202020202ULL,
+    0x0404040404040404ULL, 0x0808080808080808ULL,
+    0x1010101010101010ULL, 0x2020202020202020ULL,
+    0x4040404040404040ULL, 0x8080808080808080ULL,
+};
+
+// For each file, the OR of its two adjacent files' masks (or one, at the
+// A/H edges). An isolated pawn is one whose adjacent-file mask contains
+// no friendly pawns.
+static constexpr Bitboard ADJACENT_FILE_MASK[8] = {
+    PAWN_FILE_MASK[1],
+    PAWN_FILE_MASK[0] | PAWN_FILE_MASK[2],
+    PAWN_FILE_MASK[1] | PAWN_FILE_MASK[3],
+    PAWN_FILE_MASK[2] | PAWN_FILE_MASK[4],
+    PAWN_FILE_MASK[3] | PAWN_FILE_MASK[5],
+    PAWN_FILE_MASK[4] | PAWN_FILE_MASK[6],
+    PAWN_FILE_MASK[5] | PAWN_FILE_MASK[7],
+    PAWN_FILE_MASK[6],
+};
 
 // Bonus per rank a passed pawn has advanced. Indexed by "how far from
 // starting rank" — rank 2 = 0 advance, rank 7 = 5 advances. MG values
@@ -151,6 +173,19 @@ static Bitboard PASSED_PAWN_MASK[NUM_COLORS][NUM_SQUARES];
 // pieces); EG values are large (a passed pawn IS the endgame).
 static constexpr int PASSED_MG[8] = { 0,  5, 10, 20, 35, 60, 90, 0 };
 static constexpr int PASSED_EG[8] = { 0, 10, 25, 45, 75, 120, 200, 0 };
+
+// Isolated pawn penalty: no friendly pawn on adjacent files. Standard
+// starter values from the Chess Programming Wiki — isolated pawns are
+// harder to defend and easier to blockade, worse in the endgame where
+// the piece cover thins out.
+static constexpr int ISOLATED_MG = -15;
+static constexpr int ISOLATED_EG = -20;
+
+// Doubled pawn penalty: applied per EXTRA pawn on a file (two pawns
+// stacked → one penalty, three → two, etc.). Doubled pawns block each
+// other and can't defend each other diagonally.
+static constexpr int DOUBLED_MG = -10;
+static constexpr int DOUBLED_EG = -20;
 
 namespace eval {
 void init() {
@@ -176,18 +211,32 @@ void init() {
 }
 }  // namespace eval
 
-// Sum passed-pawn bonuses for `us`. Returns a pair of (mg_bonus, eg_bonus)
-// packed into two accumulator refs — cheaper than one call per phase.
-static void passed_pawn_bonus(const Position& pos, Color us,
-                              int& mg_out, int& eg_out) {
+// Sum passed + isolated + doubled contributions for `us` into the
+// accumulator refs. One pass over the pawns handles per-pawn terms
+// (passed, isolated); a per-file loop handles doubled counting.
+static void pawn_structure_side(const Position& pos, Color us,
+                                int& mg_out, int& eg_out) {
     int mg = 0;
     int eg = 0;
+    const Bitboard our_pawns   = pos.pieces[us][PAWN];
     const Bitboard enemy_pawns = pos.pieces[Color(us ^ 1)][PAWN];
-    Bitboard our_pawns = pos.pieces[us][PAWN];
-    while (our_pawns != 0U) {
-        Square s = pop_lsb(our_pawns);
+
+    for (int f = 0; f < 8; ++f) {
+        int count = popcount(PAWN_FILE_MASK[f] & our_pawns);
+        if (count > 1) {
+            mg += DOUBLED_MG * (count - 1);
+            eg += DOUBLED_EG * (count - 1);
+        }
+    }
+
+    Bitboard b = our_pawns;
+    while (b != 0U) {
+        Square s = pop_lsb(b);
+        if ((ADJACENT_FILE_MASK[file_of(s)] & our_pawns) == 0) {
+            mg += ISOLATED_MG;
+            eg += ISOLATED_EG;
+        }
         if ((PASSED_PAWN_MASK[us][s] & enemy_pawns) == 0) {
-            // Advance rank from the pawn's starting side.
             int adv = (us == WHITE) ? (rank_of(s) - 1) : (6 - rank_of(s));
             if (adv >= 0 && adv < 8) {
                 mg += PASSED_MG[adv];
@@ -197,6 +246,50 @@ static void passed_pawn_bonus(const Position& pos, Color us,
     }
     mg_out += mg;
     eg_out += eg;
+}
+
+// --- Pawn hash table ----------------------------------------------------
+// Cache the (mg, eg) diff (WHITE - BLACK) of the pawn structure eval,
+// keyed on Position::pawn_key. Direct-mapped, always-replace. Collisions
+// are resolved by comparing the full 64-bit key — a mismatch triggers a
+// recompute rather than trusting a stale entry. Small enough to sit in
+// L2 (16k * 16 bytes = 256KB). No clearing between games: pawn-structure
+// eval is a pure function of pawn positions, so entries stay valid
+// across `ucinewgame` boundaries.
+constexpr int    PAWN_HASH_BITS = 14;
+constexpr size_t PAWN_HASH_SIZE = 1UL << PAWN_HASH_BITS;
+
+struct PawnEntry {
+    uint64_t key;
+    int16_t  mg;
+    int16_t  eg;
+};
+
+static PawnEntry pawn_hash[PAWN_HASH_SIZE];
+
+// Populate `mg_diff` / `eg_diff` with the WHITE - BLACK pawn structure
+// score, either from the hash or by computing and storing it.
+static void pawn_structure_eval(const Position& pos,
+                                int& mg_diff, int& eg_diff) {
+    PawnEntry& slot = pawn_hash[pos.pawn_key & (PAWN_HASH_SIZE - 1)];
+    if (slot.key == pos.pawn_key) {
+        mg_diff += slot.mg;
+        eg_diff += slot.eg;
+        return;
+    }
+    int mg_w = 0;
+    int eg_w = 0;
+    int mg_b = 0;
+    int eg_b = 0;
+    pawn_structure_side(pos, WHITE, mg_w, eg_w);
+    pawn_structure_side(pos, BLACK, mg_b, eg_b);
+    int mg = mg_w - mg_b;
+    int eg = eg_w - eg_b;
+    slot.key = pos.pawn_key;
+    slot.mg  = static_cast<int16_t>(mg);
+    slot.eg  = static_cast<int16_t>(eg);
+    mg_diff += mg;
+    eg_diff += eg;
 }
 
 // --- Bishop pair --------------------------------------------------------
@@ -271,16 +364,10 @@ int evaluate(const Position& pos) {
     mg_diff += mob_diff;
     eg_diff += mob_diff / 2;
 
-    // Passed pawns — separate MG and EG tables since a passed pawn is
-    // a mild bonus in the middlegame and often decisive in the endgame.
-    int passed_w_mg = 0;
-    int passed_w_eg = 0;
-    int passed_b_mg = 0;
-    int passed_b_eg = 0;
-    passed_pawn_bonus(pos, WHITE, passed_w_mg, passed_w_eg);
-    passed_pawn_bonus(pos, BLACK, passed_b_mg, passed_b_eg);
-    mg_diff += passed_w_mg - passed_b_mg;
-    eg_diff += passed_w_eg - passed_b_eg;
+    // Pawn structure — passed / isolated / doubled, cached in the pawn
+    // hash by pos.pawn_key so sibling positions with the same pawn
+    // skeleton share the result.
+    pawn_structure_eval(pos, mg_diff, eg_diff);
 
     // Bishop pair — flat bonus per side with two or more bishops.
     if (popcount(pos.pieces[WHITE][BISHOP]) >= 2) {
