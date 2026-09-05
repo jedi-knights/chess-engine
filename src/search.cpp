@@ -435,6 +435,7 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
 
         UndoInfo u;
         pos.make_move(m, u);
+        tt().prefetch(pos.key);
         int score = -qsearch(pos, -beta, -alpha, ply + 1, ctx);
         pos.unmake_move(m, u);
         if (ctx.stopped) {
@@ -552,6 +553,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         pos.ep_square    = NO_SQUARE;
         pos.side_to_move = Color(pos.side_to_move ^ 1);
         pos.key         ^= zobrist::SIDE;
+        tt().prefetch(pos.key);
 
         constexpr int R = 3;
         int null_score = -negamax(pos, depth - 1 - R,
@@ -617,6 +619,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
 
         UndoInfo u;
         pos.make_move(m, u);
+        tt().prefetch(pos.key);
 
         // PVS + LMR:
         //   - First move (i==0) is our best guess — search at full window
@@ -739,6 +742,7 @@ bool search_root(Position& pos, int depth,
         Move m = moves[i];
         UndoInfo u;
         pos.make_move(m, u);
+        tt().prefetch(pos.key);
         // Root PVS: the first move (best guess from prior iteration's TT
         // hint or move ordering) gets a full-window search to establish
         // the PV. Later moves get a null-window probe first — if they

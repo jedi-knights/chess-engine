@@ -44,6 +44,16 @@ public:
 
     void store(uint64_t key, int depth, int score, Move move, TTBound bound);
 
+    // Issue a non-blocking cache-line prefetch for the slot that `key`
+    // maps to. Callers invoke this right after `make_move` so the child
+    // node's TT entry starts loading from memory in parallel with the
+    // ~100+ cycles of setup work (node counter, stop check, in_check
+    // computation, static eval) before the actual probe runs. On a hit
+    // this hides most or all of the ~200-cycle main-memory latency.
+    void prefetch(uint64_t key) const {
+        __builtin_prefetch(&entries_[key & mask_], /*rw=*/0, /*locality=*/3);
+    }
+
     size_t size() const { return entries_.size(); }
 
 private:
