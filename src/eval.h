@@ -24,14 +24,25 @@ int evaluate(const Position& pos,
 // before any evaluate() call.
 namespace eval { void init(); }
 
-// Tunable weights exposed for coordinate-descent tuning. All non-PSQ
-// terms (values that don't feed into the incremental psq_mg / psq_eg
-// accumulators — those would need Position recomputation on change).
-// Kept as a struct with default values matching the previous constexpr
-// literals so eval semantics are unchanged out-of-the-box; the tuner
-// mutates them at runtime.
+// Tunable weights exposed for coordinate-descent tuning. Non-PSQ terms
+// (mobility, pawn structure, king safety) can be tuned without any
+// Position invalidation. PSQ terms (piece_values[]) feed the
+// incremental psq_mg / psq_eg accumulators — callers that mutate them
+// must call Position::recompute_psq() on every position whose eval
+// they care about, or the accumulators go stale.
+//
+// Default values match the previous constexpr literals so eval
+// semantics are unchanged out-of-the-box; the tuner mutates them at
+// runtime and calls recompute_psq() when needed.
 namespace eval {
 struct TuningParams {
+    // PSQ-affecting: mutating requires Position::recompute_psq(). Index
+    // 0 (NO_PIECE_TYPE) and 6 (KING) stay 0 — the king has no material
+    // value (losing it means the game is already lost), and no-piece is
+    // a sentinel. Kaufman classical values elsewhere.
+    int piece_values[NUM_PIECE_TYPES] = { 0, 100, 320, 330, 500, 900, 0 };
+
+    // Non-PSQ terms.
     int isolated_mg                 = -15;
     int isolated_eg                 = -20;
     int doubled_mg                  = -10;
@@ -53,20 +64,22 @@ extern TuningParams params;
 // psq_mg / psq_eg incrementally. Not intended for other consumers.
 namespace eval {
 
-extern const int PIECE_VALUE[NUM_PIECE_TYPES];
 extern const int* const PST_MG_TABLE[NUM_PIECE_TYPES];
 extern const int* const PST_EG_TABLE[NUM_PIECE_TYPES];
 
 // Combined material + PST for one piece at one square, from `c`'s
 // perspective (black's tables are the vertical mirror of white's).
 // Inline so the make/unmake hot path pays no function-call cost.
+// Reads material from eval::params so the tuner can mutate values at
+// runtime; PST tables remain constexpr for now (tuning them would
+// require 384*2 additional weight entries).
 inline int psq_mg(Color c, PieceType pt, Square sq) {
     Square lookup = (c == WHITE) ? sq : Square(int(sq) ^ 56);
-    return PIECE_VALUE[pt] + PST_MG_TABLE[pt][lookup];
+    return params.piece_values[pt] + PST_MG_TABLE[pt][lookup];
 }
 inline int psq_eg(Color c, PieceType pt, Square sq) {
     Square lookup = (c == WHITE) ? sq : Square(int(sq) ^ 56);
-    return PIECE_VALUE[pt] + PST_EG_TABLE[pt][lookup];
+    return params.piece_values[pt] + PST_EG_TABLE[pt][lookup];
 }
 
 }  // namespace eval

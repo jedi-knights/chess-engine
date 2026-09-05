@@ -112,7 +112,23 @@ struct Weight {
     int*        value;
     int         lo;
     int         hi;
+    // PSQ-affecting weights (piece_values) feed the incremental
+    // psq_mg / psq_eg accumulators on Position. Mutating one means
+    // every position's accumulator is now stale relative to the new
+    // weight; the tuner must call recompute_psq() on the whole
+    // dataset before the next MSE evaluation.
+    bool        affects_psq = false;
 };
+
+// Refresh psq accumulators on every position. Only needed after a
+// PSQ-affecting weight mutation. Cost is ~32 iterations per position
+// (average non-pawn material) — negligible for tiny demo datasets,
+// ~3M ops per pass for a 100k-position tuning run.
+void refresh_psq(std::vector<Sample>& data) {
+    for (auto& s : data) {
+        s.pos.recompute_psq();
+    }
+}
 
 // Coordinate descent: for each weight, walk in the direction that
 // improves MSE until it stops improving, then move to the next weight.
@@ -120,9 +136,19 @@ struct Weight {
 // improvement. Simple and monotonically-improving; O(iterations *
 // weights * dataset_size) evaluations per sweep.
 void coord_descent(std::vector<Weight>& weights,
-                   const std::vector<Sample>& data, double K) {
+                   std::vector<Sample>& data, double K) {
     double best = compute_mse(data, K);
     std::printf("Initial MSE: %.7f\n", best);
+
+    // Small helper: set the weight and refresh PSQ if the weight
+    // feeds the incremental accumulators. Grouping the two together
+    // means MSE always sees fresh state.
+    auto set_weight = [&](Weight& w, int v) {
+        *w.value = v;
+        if (w.affects_psq) {
+            refresh_psq(data);
+        }
+    };
 
     bool improved = true;
     int  sweep    = 0;
@@ -135,7 +161,7 @@ void coord_descent(std::vector<Weight>& weights,
 
             // Search up.
             for (int v = orig + 1; v <= w.hi; ++v) {
-                *w.value = v;
+                set_weight(w, v);
                 double m = compute_mse(data, K);
                 if (m + 1e-9 < best) {
                     best     = m;
@@ -149,7 +175,7 @@ void coord_descent(std::vector<Weight>& weights,
             // exclusive by monotonicity of the loss along one axis.
             if (best_val == orig) {
                 for (int v = orig - 1; v >= w.lo; --v) {
-                    *w.value = v;
+                    set_weight(w, v);
                     double m = compute_mse(data, K);
                     if (m + 1e-9 < best) {
                         best     = m;
@@ -160,7 +186,9 @@ void coord_descent(std::vector<Weight>& weights,
                     }
                 }
             }
-            *w.value = best_val;
+            // Always restore through set_weight so PSQ state matches
+            // best_val even after a backed-out probe.
+            set_weight(w, best_val);
         }
         std::printf("Sweep %d: MSE = %.7f\n", sweep, best);
     }
@@ -183,10 +211,20 @@ int run_tune(const std::string& dataset_path) {
 
     // Weights exposed for tuning. `lo` / `hi` are search bounds — set
     // wide but not unbounded so a divergent sweep can't run forever.
-    // Non-PSQ weights only; PSQ terms (piece values, PST) would
-    // require recomputing Position::psq_mg / psq_eg on every candidate,
-    // which needs a Position API this tuner doesn't have.
+    // `affects_psq` = true means mutating the weight invalidates the
+    // incremental Position::psq_mg / psq_eg accumulators; the tuner
+    // rebuilds them via Position::recompute_psq on every candidate.
+    // King's piece_values[KING] intentionally omitted — the king has
+    // no material value (losing it means the game is already lost).
     std::vector<Weight> weights = {
+        // Piece values (PSQ-affecting).
+        {"piece_pawn",   &eval::params.piece_values[PAWN],   50, 200, true},
+        {"piece_knight", &eval::params.piece_values[KNIGHT], 200, 500, true},
+        {"piece_bishop", &eval::params.piece_values[BISHOP], 200, 500, true},
+        {"piece_rook",   &eval::params.piece_values[ROOK],   350, 700, true},
+        {"piece_queen",  &eval::params.piece_values[QUEEN],  700, 1300, true},
+
+        // Non-PSQ terms.
         {"isolated_mg",                 &eval::params.isolated_mg,                 -100, 100},
         {"isolated_eg",                 &eval::params.isolated_eg,                 -100, 100},
         {"doubled_mg",                  &eval::params.doubled_mg,                  -100, 100},
@@ -209,19 +247,25 @@ int run_tune(const std::string& dataset_path) {
     for (const auto& w : weights) {
         // Fetch the default by name so the diff is obvious at review.
         int def = 0;
-        if      (std::string(w.name) == "isolated_mg")                 { def = defaults.isolated_mg; }
-        else if (std::string(w.name) == "isolated_eg")                 { def = defaults.isolated_eg; }
-        else if (std::string(w.name) == "doubled_mg")                  { def = defaults.doubled_mg; }
-        else if (std::string(w.name) == "doubled_eg")                  { def = defaults.doubled_eg; }
-        else if (std::string(w.name) == "bishop_pair_mg")              { def = defaults.bishop_pair_mg; }
-        else if (std::string(w.name) == "bishop_pair_eg")              { def = defaults.bishop_pair_eg; }
-        else if (std::string(w.name) == "mob_knight")                  { def = defaults.mob_knight; }
-        else if (std::string(w.name) == "mob_bishop")                  { def = defaults.mob_bishop; }
-        else if (std::string(w.name) == "mob_rook")                    { def = defaults.mob_rook; }
-        else if (std::string(w.name) == "mob_queen")                   { def = defaults.mob_queen; }
-        else if (std::string(w.name) == "shield_missing_penalty")      { def = defaults.shield_missing_penalty; }
-        else if (std::string(w.name) == "king_open_file_penalty")      { def = defaults.king_open_file_penalty; }
-        else if (std::string(w.name) == "king_semi_open_file_penalty") { def = defaults.king_semi_open_file_penalty; }
+        const std::string name = w.name;
+        if      (name == "piece_pawn")                   { def = defaults.piece_values[PAWN]; }
+        else if (name == "piece_knight")                 { def = defaults.piece_values[KNIGHT]; }
+        else if (name == "piece_bishop")                 { def = defaults.piece_values[BISHOP]; }
+        else if (name == "piece_rook")                   { def = defaults.piece_values[ROOK]; }
+        else if (name == "piece_queen")                  { def = defaults.piece_values[QUEEN]; }
+        else if (name == "isolated_mg")                  { def = defaults.isolated_mg; }
+        else if (name == "isolated_eg")                  { def = defaults.isolated_eg; }
+        else if (name == "doubled_mg")                   { def = defaults.doubled_mg; }
+        else if (name == "doubled_eg")                   { def = defaults.doubled_eg; }
+        else if (name == "bishop_pair_mg")               { def = defaults.bishop_pair_mg; }
+        else if (name == "bishop_pair_eg")               { def = defaults.bishop_pair_eg; }
+        else if (name == "mob_knight")                   { def = defaults.mob_knight; }
+        else if (name == "mob_bishop")                   { def = defaults.mob_bishop; }
+        else if (name == "mob_rook")                     { def = defaults.mob_rook; }
+        else if (name == "mob_queen")                    { def = defaults.mob_queen; }
+        else if (name == "shield_missing_penalty")       { def = defaults.shield_missing_penalty; }
+        else if (name == "king_open_file_penalty")       { def = defaults.king_open_file_penalty; }
+        else if (name == "king_semi_open_file_penalty")  { def = defaults.king_semi_open_file_penalty; }
         std::printf("  %-30s = %4d   (was %d)\n", w.name, *w.value, def);
     }
     return 0;

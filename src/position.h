@@ -81,6 +81,15 @@ struct Position {
     void make_move(Move m, UndoInfo& u);
     void unmake_move(Move m, const UndoInfo& u);
 
+    // Rebuild psq_mg[] / psq_eg[] from scratch by summing over every
+    // piece on the board. Called by set_from_fen (which sets bitboards
+    // directly, not via put_piece); also intended for the Texel tuner
+    // to invalidate the incremental accumulators after mutating
+    // eval::params.piece_values or a PST table. Does NOT touch the
+    // Zobrist key, pawn_key, or history stack — those don't depend on
+    // eval weights.
+    void recompute_psq();
+
 private:
     void put_piece(Square s, Piece p);
     void remove_piece(Square s);
