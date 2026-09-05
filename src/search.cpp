@@ -20,7 +20,9 @@ constexpr int MATE_SCORE = 100'000;     // large but distinguishable from INF
 
 // Module-static TT — lives for the process, warm across `go` commands so
 // iterative deepening's later iterations can hit entries from earlier
-// iterations. Sized at 2^20 entries (~24 MB with 24-byte TTEntry).
+// iterations. Sized at 2^20 entries total = 2^19 two-slot buckets
+// (~16 MB). Replacement is depth-preferred with per-search aging;
+// search_iterative bumps the generation counter once per `go`.
 TranspositionTable& tt() {
     static TranspositionTable inst(20);
     return inst;
@@ -953,6 +955,12 @@ void clear_transposition_table() {
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) — iterative-deepening driver fuses aspiration windows, time-management, PV extraction, and stop polling; splitting hurts readability more than it helps. See CLAUDE.md perf table.
 SearchResult search_iterative(Position& pos, SearchLimits limits,
                               const InfoCallback& on_iter) {
+    // Bump the TT generation so entries stored by earlier `go` calls
+    // preferentially age out — a mid-game position 30 moves deep will
+    // otherwise contend with stale root entries that never see another
+    // hit and only waste bucket capacity.
+    tt().new_search();
+
     SearchContext ctx;
     ctx.limits = limits;
     ctx.start  = Clock::now();
