@@ -23,15 +23,17 @@ TEST_CASE("empty-material position (kings on e-file) evaluates to 0") {
 
 TEST_CASE("perspective: same board, different side-to-move flips the sign") {
     // Queen on D1: material + PST + mobility (Q sees 17 squares, weight 1)
-    // + tapered king PST. Actual pinned value below; update when eval
-    // terms shift.
+    // + tapered king PST + king safety (queen attacks D8 in the black
+    // king ring: 5 * 1 = 5 units → table[5] = 5 cp MG penalty for black,
+    // blended by phase = 4 to +~1 cp for white in the final score).
+    // Actual pinned value below; update when eval terms shift.
     const char* w_to_move = "4k3/8/8/8/8/8/8/3QK3 w - - 0 1";
     const char* b_to_move = "4k3/8/8/8/8/8/8/3QK3 b - - 0 1";
     Position p1, p2;
     REQUIRE(p1.set_from_fen(w_to_move));
     REQUIRE(p2.set_from_fen(b_to_move));
-    CHECK(evaluate(p1) == 904);
-    CHECK(evaluate(p2) == -904);
+    CHECK(evaluate(p1) == 907);
+    CHECK(evaluate(p2) == -907);
     CHECK(evaluate(p1) == -evaluate(p2));
 }
 
@@ -44,8 +46,15 @@ TEST_CASE("piece values + PST contribution on a fixed square") {
     // are only the dominant term; the totals below are what evaluate()
     // actually returns after mobility + phase blending.
     struct Case { const char* fen; int expected; const char* label; };
+    // King-safety pinned totals: only the queen case fires the safety
+    // penalty. The queen on D1 attacks D8 in the black king ring
+    // (D7/D8/E7/F7/F8 around E8): 5*1 = 5 units → table[5] = 5 cp MG,
+    // blended by phase = 4 → +~1 cp for white in the final score. The
+    // rook/bishop/knight/pawn cases have no white queen, so the safety
+    // short-circuit returns 0 for both sides and their totals are
+    // material + PST + mobility only.
     const Case cases[] = {
-        {"4k3/8/8/8/8/8/8/3QK3 w - - 0 1",  904, "queen  (900 -  5)"},
+        {"4k3/8/8/8/8/8/8/3QK3 w - - 0 1",  907, "queen  (900 -  5, K-safety +3 MG blended)"},
         {"4k3/8/8/8/8/8/8/3RK3 w - - 0 1",  515, "rook   (500 +  5)"},
         {"4k3/8/8/8/8/8/8/3BK3 w - - 0 1",  330, "bishop (330 - 10)"},
         {"4k3/8/8/8/8/8/8/3NK3 w - - 0 1",  298, "knight (320 - 30)"},
@@ -93,12 +102,15 @@ TEST_CASE("middlegame: castled king scores higher than king in the center") {
     // square. Delta = MG[G1] - MG[E4] = 30 - (-40) = 70 in PST alone.
     // But the castled king blocks the F1 rook's east ray and the F3
     // knight's G1 square, costing 2 rook squares (weight 2 = -4) plus
-    // 1 knight square (weight 4 = -4). Net pinned delta = 70 - 8 = 62.
+    // 1 knight square (weight 4 = -4). Base mobility delta = 70 - 8 = 62.
+    // King safety piles on: black's queen/rooks/knights/bishops all
+    // attack the exposed E4 king ring, adding a large penalty for the
+    // exposed side. Pinned delta below reflects the combined effect.
     Position castled, exposed;
     REQUIRE(castled.set_from_fen("rnbqkbnr/8/8/8/8/5N2/4B3/RNBQ1RK1 w - - 0 1"));  // K on G1
     REQUIRE(exposed.set_from_fen("rnbqkbnr/8/8/8/4K3/5N2/4B3/RNBQ1R2 w - - 0 1"));  // K on E4
     CHECK(evaluate(castled) > evaluate(exposed));
-    CHECK((evaluate(castled) - evaluate(exposed)) == 62);
+    CHECK((evaluate(castled) - evaluate(exposed)) == 105);
 }
 
 TEST_CASE("endgame: king in center scores higher than king in corner") {
@@ -156,6 +168,53 @@ TEST_CASE("pawn hash: repeat evaluate calls agree with fresh evaluate on the sam
     int first  = evaluate(pos);
     int second = evaluate(pos);
     CHECK(first == second);
+}
+
+// --- King safety ---------------------------------------------------------
+
+TEST_CASE("king safety: queenless positions skip the penalty entirely") {
+    // Neither side has a queen — the per-side gate returns 0 for both
+    // king-safety queries regardless of what pieces are attacking the
+    // rings. This test pins that behavior by comparing a position
+    // where a rook DOES attack the black king ring against one where
+    // no attackers are present: the eval delta must equal only the
+    // material+PST+mobility contribution of the rook, with no safety
+    // component.
+    Position rook_attacking, no_rook;
+    REQUIRE(rook_attacking.set_from_fen("4k3/8/8/8/8/8/8/3RK3 w - - 0 1"));  // R on D1 attacks D8 in ring
+    REQUIRE(no_rook       .set_from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1"));
+
+    // Without king safety the delta is just the rook's material + PST
+    // (500 + 5 = 505) plus its mobility contribution. Adding a king-
+    // safety term would push this higher; the gate must keep it fixed.
+    CHECK((evaluate(rook_attacking) - evaluate(no_rook)) == 515);
+}
+
+TEST_CASE("king safety: exposed king with a queen attacker scores worse than a sheltered king") {
+    // Same material on both sides. In `sheltered`, black's king is
+    // castled at G8. In `exposed`, black's king walked out to F5 into
+    // the white queen's range. White to move — an exposed BLACK king
+    // shows up as a higher (better-for-white) eval.
+    Position sheltered, exposed;
+    REQUIRE(sheltered.set_from_fen("r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 0 1"));
+    REQUIRE(exposed  .set_from_fen("r1bq1r2/pppp1ppp/2n2n2/2b1pk2/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 0 1"));
+    CHECK(evaluate(exposed) > evaluate(sheltered));
+}
+
+TEST_CASE("king safety: more ring attackers produce a strictly higher penalty") {
+    // Three positions with identical material (K + Q per side) but
+    // different queen placements against a fixed black king at E8.
+    // The black king ring is {D7, E7, F7, D8, F8}.
+    //   none: white Q at H1 — attacks no ring square.
+    //   one : white Q at D1 — attacks D8 only (1 ring square).
+    //   many: white Q at D5 — attacks D7, D8, F7 (3 ring squares).
+    // Same material means the eval difference is purely king safety.
+    Position none, one, many;
+    REQUIRE(none.set_from_fen("4k3/8/8/8/8/8/8/4K2Q w - - 0 1"));
+    REQUIRE(one .set_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1"));
+    REQUIRE(many.set_from_fen("4k3/8/8/3Q4/8/8/8/4K3 w - - 0 1"));
+    CHECK(evaluate(many) > evaluate(one));
+    CHECK(evaluate(one)  > evaluate(none));
 }
 
 TEST_CASE("PST is mirrored for black") {

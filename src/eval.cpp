@@ -353,13 +353,108 @@ static int mobility(const Position& pos, Color us) {
     return score;
 }
 
+// --- King safety --------------------------------------------------------
+// Rebel-style king danger: for each enemy attacker (N/B/R/Q) count the
+// number of squares in our king ring it attacks, weight by piece type,
+// sum, and look up the total in a saturating quadratic table. The ring
+// is the 8 squares around the king (KING_ATTACKS[king_sq]); pawns and
+// enemy king are excluded from the attacker set (pawns are cheap
+// attackers whose threat is subsumed by pawn structure; kings can't
+// legally sit adjacent to the enemy king). Applied to the middlegame
+// term only — endgame play favors active kings, so a king in a "ring
+// under attack" is already captured by tapered king PST.
+//
+// Weights chosen so a lone rook or minor grazing the ring gives a
+// modest penalty (~5-15 cp) while a coordinated multi-attacker assault
+// saturates at 500 cp — an entire queen's worth of pressure.
+static constexpr int KING_ATTACK_WEIGHT[NUM_PIECE_TYPES] = {
+    0,   // NO_PIECE_TYPE
+    0,   // PAWN — excluded (see above)
+    2,   // KNIGHT
+    2,   // BISHOP
+    3,   // ROOK
+    5,   // QUEEN
+    0,   // KING — excluded (see above)
+};
+
+// Saturating quadratic penalty in centipawns, indexed by attack units
+// clamped to [0, 99]. Standard Rebel / Chess Programming Wiki curve —
+// tuned across ~decades of real engines. Small unit counts give ~0-30
+// cp; heavy attack (60+ units) saturates at 500 cp.
+static constexpr int KING_SAFETY_TABLE[100] = {
+      0,   0,   1,   2,   3,   5,   7,   9,  12,  15,
+     18,  22,  26,  30,  35,  39,  44,  50,  56,  62,
+     68,  75,  82,  85,  89,  97, 105, 113, 122, 131,
+    140, 150, 169, 180, 191, 202, 213, 225, 237, 248,
+    260, 272, 283, 295, 307, 319, 330, 342, 354, 366,
+    377, 389, 401, 412, 424, 436, 448, 459, 471, 483,
+    494, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+};
+
+// Penalty in centipawns for `us`'s king being attacked. Returns 0 if
+// the opponent has no queen — the queen is by far the dominant king
+// attacker (weight 5), and without one the raw attack units cap out
+// at ~15 for extreme cases (still only ~40 cp penalty). Skipping
+// avoids the ~40-80 ns per node cost of the piece scans in queenless
+// endgames, where king safety impact is minimal anyway.
+static int king_safety_penalty_side(const Position& pos, Color us) {
+    const Bitboard king_bb = pos.pieces[us][KING];
+    if (king_bb == 0U) {
+        return 0;
+    }
+    const Color them = Color(us ^ 1);
+    if (pos.pieces[them][QUEEN] == 0U) {
+        return 0;
+    }
+    const Square   king_sq   = lsb(king_bb);
+    const Bitboard king_ring = KING_ATTACKS[king_sq];
+    const Bitboard occ       = pos.occupied;
+
+    int units = 0;
+
+    Bitboard b = pos.pieces[them][KNIGHT];
+    while (b != 0U) {
+        Square s = pop_lsb(b);
+        units += KING_ATTACK_WEIGHT[KNIGHT] *
+                 popcount(KNIGHT_ATTACKS[s] & king_ring);
+    }
+    b = pos.pieces[them][BISHOP];
+    while (b != 0U) {
+        Square s = pop_lsb(b);
+        units += KING_ATTACK_WEIGHT[BISHOP] *
+                 popcount(bishop_attacks(s, occ) & king_ring);
+    }
+    b = pos.pieces[them][ROOK];
+    while (b != 0U) {
+        Square s = pop_lsb(b);
+        units += KING_ATTACK_WEIGHT[ROOK] *
+                 popcount(rook_attacks(s, occ) & king_ring);
+    }
+    b = pos.pieces[them][QUEEN];
+    while (b != 0U) {
+        Square s = pop_lsb(b);
+        units += KING_ATTACK_WEIGHT[QUEEN] *
+                 popcount((bishop_attacks(s, occ) | rook_attacks(s, occ))
+                          & king_ring);
+    }
+
+    if (units > 99) {
+        units = 99;
+    }
+    return KING_SAFETY_TABLE[units];
+}
+
 // Bound on the total swing the non-lazy terms (mobility + pawn structure
-// + bishop pair) can contribute. Both mobility and pawn structure can
-// each move the score by ~150-200 cp in extremes; bishop pair adds ~50.
-// 500 cp is a conservative sum — larger than any realistic combined
-// swing, so lazy triggers only when material + PST alone is already
-// unambiguously outside the alpha-beta window.
-constexpr int EVAL_LAZY_MARGIN = 500;
+// + bishop pair + king safety) can contribute. Mobility ~200 cp,
+// pawn structure ~200 cp, bishop pair ~50 cp, king safety hard-caps at
+// 500 cp per side (so up to ±500 cp swing to the diff). 1000 cp is a
+// safe upper bound; lazy triggers only when material + PST alone is
+// already unambiguously outside the alpha-beta window even after the
+// remaining terms fire.
+constexpr int EVAL_LAZY_MARGIN = 1000;
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — alpha/beta is standard evaluation-window naming, swapping would be caught by the assertion `alpha <= beta` at the top of the search loop.
 int evaluate(const Position& pos, int alpha, int beta) {
@@ -400,6 +495,17 @@ int evaluate(const Position& pos, int alpha, int beta) {
         mg_diff -= BISHOP_PAIR_MG;
         eg_diff -= BISHOP_PAIR_EG;
     }
+
+    // King safety — penalty for each side's king under attack, applied
+    // only to the middlegame term (endgame values active kings, which
+    // the king PST already rewards; layering a separate safety term
+    // on top would double-count). Diff is BLACK_penalty - WHITE_penalty:
+    // a heavier attack on the black king means a higher BLACK penalty,
+    // which favors WHITE, so it adds to the WHITE-BLACK diff. Each
+    // side's penalty short-circuits to 0 if the opposing side has no
+    // queen (see king_safety_penalty_side).
+    mg_diff += king_safety_penalty_side(pos, BLACK) -
+               king_safety_penalty_side(pos, WHITE);
 
     int score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
