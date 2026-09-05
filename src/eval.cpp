@@ -581,12 +581,75 @@ static int pawn_storm_penalty_side(const Position& pos, Color us) {
     return penalty;
 }
 
+// --- King on open / half-open file --------------------------------------
+// Penalty when the king sits on a file that enemy heavy pieces (rook or
+// queen) can invade. Distinct from pawn shield / storm — those measure
+// the pawn structure around a castled king; this measures a specific
+// attack vector (the file itself) and applies to *any* king position
+// including uncastled central kings. Gated on enemy having at least
+// one rook or queen; without heavy pieces there's no threat down the
+// file. MG-only (endgame king activity dominates).
+//
+// Two cases, in order of severity:
+//   fully open   (no pawns of either color on the file): enemy rook or
+//                queen has a direct line to our king → biggest penalty.
+//   half-open    (we have no pawn, enemy does): their heavy piece hits
+//                their own pawn eventually, but the pawn typically sits
+//                far from our king → moderate penalty.
+// A file where we have a pawn is fine — our pawn blocks the line
+// regardless of what the enemy has.
+static constexpr int KING_OPEN_FILE_PENALTY      = 30;
+static constexpr int KING_SEMI_OPEN_FILE_PENALTY = 15;
+
+static int king_open_file_penalty_side(const Position& pos, Color us) {
+    const Bitboard king_bb = pos.pieces[us][KING];
+    if (king_bb == 0U) {
+        return 0;
+    }
+    const Color them = Color(us ^ 1);
+    // Queen-only gate: an open file matters far more when a queen can
+    // slide down it. Rook-only endgames give false signals — an active
+    // king on an open file is often the right move, and mobility
+    // already captures the rook's file-attack potential.
+    if (pos.pieces[them][QUEEN] == 0U) {
+        return 0;
+    }
+
+    const Square king_sq   = lsb(king_bb);
+    const int    king_file = file_of(king_sq);
+    const int    king_rank = rank_of(king_sq);
+
+    // Wing + home-rank gate, matching pawn shield / pawn storm. Rationale:
+    // for an uncastled central king (file D/E), the position is fluid
+    // and file-openness is transient — the king is likely about to
+    // castle or step aside. Scoring these transient states injects
+    // noise into the search. For a castled king (files A-C or F-H,
+    // home rank), file-openness is a persistent strategic feature.
+    if (king_file >= FILE_D && king_file <= FILE_E) {
+        return 0;
+    }
+    const int home_rank = (us == WHITE) ? int(RANK_1) : int(RANK_8);
+    if (king_rank != home_rank) {
+        return 0;
+    }
+
+    const Bitboard our_on_file   = pos.pieces[us]  [PAWN] & PAWN_FILE_MASK[king_file];
+    const Bitboard their_on_file = pos.pieces[them][PAWN] & PAWN_FILE_MASK[king_file];
+
+    if (our_on_file == 0U) {
+        return (their_on_file == 0U) ? KING_OPEN_FILE_PENALTY
+                                     : KING_SEMI_OPEN_FILE_PENALTY;
+    }
+    return 0;
+}
+
 // Bound on the total swing the non-lazy terms can contribute:
 // mobility ~200, pawn structure ~200, bishop pair ~50, king safety
 // caps at ±500, pawn shield caps at ±(3 * max(BONUS,MISSING)) = ±45,
-// pawn storm caps at ±(3 * STORM_PENALTY[0]) = ±90. 1200 cp comfortably
-// covers the combined worst case (~1135); lazy triggers only when
-// material + PST alone is already unambiguously outside the alpha-beta
+// pawn storm caps at ±(3 * STORM_PENALTY[0]) = ±90, king-on-open-file
+// caps at ±KING_OPEN_FILE_PENALTY = ±30. 1200 cp comfortably covers
+// the combined worst case (~1165); lazy triggers only when material
+// + PST alone is already unambiguously outside the alpha-beta
 // window even after the remaining terms fire.
 constexpr int EVAL_LAZY_MARGIN = 1200;
 
@@ -655,6 +718,13 @@ int evaluate(const Position& pos, int alpha, int beta) {
     // add black's penalty and subtract white's.
     mg_diff += pawn_storm_penalty_side(pos, BLACK) -
                pawn_storm_penalty_side(pos, WHITE);
+
+    // King on open / half-open file — additional penalty for the file
+    // the king sits on being exposed to enemy heavy pieces. Higher
+    // WHITE penalty → bad for white → add black's penalty and subtract
+    // white's, same sign convention as the storm term.
+    mg_diff += king_open_file_penalty_side(pos, BLACK) -
+               king_open_file_penalty_side(pos, WHITE);
 
     int score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
