@@ -73,6 +73,13 @@ struct SearchContext {
     // can't crawl above the losing-capture ordering band (100k) or the
     // killer bands (800k, 900k) over long searches with many cutoffs.
     int  history[NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES] = {};
+
+    // Countermove table: for each (side, piece_type, dest_square) that
+    // the OPPONENT could have last moved to, remember our quiet reply
+    // that produced a beta cutoff. Serves as a third quiet-move ordering
+    // signal below killers and above losing captures — a good response
+    // to a specific opponent move often repeats in similar contexts.
+    Move countermove[NUM_COLORS][NUM_PIECE_TYPES][NUM_SQUARES] = {};
 };
 
 // Ceiling on any single (side, piece, dest) history slot. Sits well
@@ -267,13 +274,17 @@ int see(const Position& pos, Move m) {
 //   Winning cap/promo (SEE >= 0)  :  1,000,000 + SEE
 //   Killer 1                      :    900,000
 //   Killer 2                      :    800,000
+//   Countermove                   :    700,000
 //   Losing cap/promo (SEE  < 0)   :    100,000 + SEE   (still above quiets)
 //   Quiet (history)               :          0 .. ~HISTORY_MAX
 //
 // Non-capture promotions go through the SEE path too — a non-capture
 // promotion to queen is worth +800 raw, and SEE catches the case where
 // an opponent piece can recapture the promoted queen for a net loss.
-int move_ordering_score(const Position& pos, Move m, Move tt_move,
+constexpr int COUNTERMOVE_SCORE = 700'000;
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — tt_move and prev_move are semantically distinct (best cached move vs. opponent's last move); grouping them into a struct would obscure the ordering-signal contract more than it clarifies.
+int move_ordering_score(const Position& pos, Move m, Move tt_move, Move prev_move,
                         const SearchContext& ctx, int ply) {
     if (m == tt_move) {
         return 10'000'000;
@@ -297,6 +308,19 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
         return 800'000;
     }
 
+    // Countermove: fires only when we're not at the root and not
+    // immediately after a null-move (prev_move == NULL_MOVE in both
+    // cases). Indexed by (opponent color, opponent piece type at the
+    // square it just moved to, that square).
+    if (prev_move != NULL_MOVE) {
+        Square    prev_to = move_to(prev_move);
+        PieceType prev_pt = type_of(pos.board[prev_to]);
+        Color     them    = Color(pos.side_to_move ^ 1);
+        if (m == ctx.countermove[them][prev_pt][prev_to]) {
+            return COUNTERMOVE_SCORE;
+        }
+    }
+
     PieceType pt = type_of(pos.board[move_from(m)]);
     return ctx.history[pos.side_to_move][pt][move_to(m)];
 }
@@ -304,11 +328,12 @@ int move_ordering_score(const Position& pos, Move m, Move tt_move,
 // Precompute ordering scores in parallel with the moves list. Called
 // once per node; the score for each move is then used by pick_move_to_front
 // without recomputing.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — tt_move and prev_move are semantically distinct; see move_ordering_score.
 void score_moves(const Position& pos, const MoveList& moves,
-                 int* scores, Move tt_move,
+                 int* scores, Move tt_move, Move prev_move,
                  const SearchContext& ctx, int ply) {
     for (int i = 0; i < moves.size(); ++i) {
-        scores[i] = move_ordering_score(pos, moves[i], tt_move, ctx, ply);
+        scores[i] = move_ordering_score(pos, moves[i], tt_move, prev_move, ctx, ply);
     }
 }
 
@@ -379,9 +404,11 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
     }
 
     // SEE-scored ordering: winning captures first, losing captures below
-    // killers/history. Also enables the SEE prune below.
+    // killers/history. Also enables the SEE prune below. Qsearch has no
+    // TT move and no countermove context — only captures + promotions
+    // are ordered, and those all get SEE scores.
     int scores[MoveList::MAX_MOVES];
-    score_moves(pos, moves, scores, NULL_MOVE, ctx, ply);
+    score_moves(pos, moves, scores, NULL_MOVE, NULL_MOVE, ctx, ply);
 
     for (int i = 0; i < moves.size(); ++i) {
         pick_move_to_front(moves, scores, i);
@@ -415,10 +442,14 @@ int qsearch(Position& pos, int alpha, int beta, int ply, SearchContext& ctx) {
 // Negamax with alpha-beta + TT + PVS + LMR + check extensions.
 // `ply` is distance from the root so we can prefer shorter mates
 // (deeper mate scores are penalized) and shorter paths out of a
-// losing position (later mates score less negative).
-// NOLINTNEXTLINE(readability-function-cognitive-complexity) — fused PVS+null-move+LMR+razoring+RFP+killer/history hot path; every branch is a documented pruning technique with a measured node-count contribution (see CLAUDE.md search perf stack).
+// losing position (later mates score less negative). `prev_move` is
+// the move opponent just played to reach this position (NULL_MOVE at
+// the root or immediately after a null-move); used to look up
+// countermove ordering and to update the countermove table on beta
+// cutoff.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — fused PVS+null-move+LMR+razoring+RFP+killer/history/countermove hot path; every branch is a documented pruning technique with a measured node-count contribution (see CLAUDE.md search perf stack).
 int negamax(Position& pos, int depth, int alpha, int beta,
-            int ply, SearchContext& ctx) {
+            int ply, Move prev_move, SearchContext& ctx) {
     ++ctx.nodes;
     if (ctx.stopped || should_stop(ctx)) { ctx.stopped = true; return 0; }
 
@@ -515,7 +546,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
 
         constexpr int R = 3;
         int null_score = -negamax(pos, depth - 1 - R,
-                                  -beta, -beta + 1, ply + 1, ctx);
+                                  -beta, -beta + 1, ply + 1, NULL_MOVE, ctx);
 
         pos.side_to_move = Color(pos.side_to_move ^ 1);
         pos.ep_square    = saved_ep;
@@ -540,7 +571,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     }
 
     int scores[MoveList::MAX_MOVES];
-    score_moves(pos, moves, scores, tt_move, ctx, ply);
+    score_moves(pos, moves, scores, tt_move, prev_move, ctx, ply);
 
     const int original_alpha = alpha;
     int  best      = -INF;
@@ -581,7 +612,7 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         //     to get a real score.
         int score;
         if (i == 0) {
-            score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
+            score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, m, ctx);
         } else {
             const bool can_reduce = depth >= 3 && !is_cap && !is_promo
                                   && !node_in_check;
@@ -590,13 +621,13 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                 reduction = (i >= 12) ? 2 : 1;
             }
             score = -negamax(pos, depth - 1 - reduction,
-                             -alpha - 1, -alpha, ply + 1, ctx);
+                             -alpha - 1, -alpha, ply + 1, m, ctx);
             if (score > alpha && (reduction > 0 || score < beta)) {
                 // Verified at full depth + full window. Two triggers:
                 // reduced probe found something (need real depth), or
                 // null-window failed high inside the ACTUAL window
                 // (need real score, not just "> alpha" upper bound).
-                score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, ctx);
+                score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, m, ctx);
             }
         }
 
@@ -611,9 +642,11 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         alpha = std::max(alpha, score);
         if (alpha >= beta) {
             // Beta cutoff on a quiet, non-promotion move: record as a
-            // killer at this ply and bump history. Captures and promos
-            // already order well via SEE, so we skip them to avoid
-            // polluting the tables with forcing moves.
+            // killer at this ply, bump history, and (if we know the
+            // opponent's last move) record as their countermove reply.
+            // Captures and promos already order well via SEE, so we
+            // skip them to avoid polluting the tables with forcing
+            // moves.
             if (!is_cap && !is_promo && ply < MAX_PLY) {
                 if (ctx.killers[ply][0] != m) {
                     ctx.killers[ply][1] = ctx.killers[ply][0];
@@ -623,6 +656,12 @@ int negamax(Position& pos, int depth, int alpha, int beta,
                 int& h = ctx.history[pos.side_to_move][pt][move_to(m)];
                 h += depth * depth;
                 h = std::min(h, HISTORY_MAX);
+                if (prev_move != NULL_MOVE) {
+                    Square    prev_to = move_to(prev_move);
+                    PieceType prev_pt = type_of(pos.board[prev_to]);
+                    Color     them    = Color(pos.side_to_move ^ 1);
+                    ctx.countermove[them][prev_pt][prev_to] = m;
+                }
             }
             break;
         }
@@ -671,7 +710,7 @@ bool search_root(Position& pos, int depth,
     tt().probe(pos.key, /*depth=*/0, -INF, INF, tt_score, tt_move);
 
     int scores[MoveList::MAX_MOVES];
-    score_moves(pos, moves, scores, tt_move, ctx, /*ply=*/0);
+    score_moves(pos, moves, scores, tt_move, /*prev_move=*/NULL_MOVE, ctx, /*ply=*/0);
 
     int  alpha     = alpha_init;
     int  best      = -INF;
@@ -691,11 +730,11 @@ bool search_root(Position& pos, int depth,
         // widen and re-search anyway.
         int score;
         if (i == 0) {
-            score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, ctx);
+            score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, m, ctx);
         } else {
-            score = -negamax(pos, depth - 1, -alpha - 1, -alpha, 1, ctx);
+            score = -negamax(pos, depth - 1, -alpha - 1, -alpha, 1, m, ctx);
             if (score > alpha && score < beta_root) {
-                score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, ctx);
+                score = -negamax(pos, depth - 1, -beta_root, -alpha, 1, m, ctx);
             }
         }
         pos.unmake_move(m, u);
