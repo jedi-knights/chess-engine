@@ -49,6 +49,9 @@ jobs:
     # Hard ceiling. TC 5+0.05 × concurrency 2 × max_games 400 fits
     # in ~2-3 hours typically; SPRT stops early on decisive changes.
     timeout-minutes: 240
+    permissions:
+      contents: read     # actions/checkout
+      issues: write      # open/comment regression issues on H0 acceptance
 
     steps:
       # Full history so we can resolve the `baseline` tag.
@@ -140,23 +143,94 @@ jobs:
               --pgn-out ../sprt.pgn 2>&1 \
               | tee ../sprt.log
 
-      # SPRT verdict lives in fastchess's log lines. Grep for the
-      # explicit hypothesis-accepted messages so a nightly regression
-      # fails the workflow loudly rather than silently passing.
+      # SPRT verdict lives in fastchess's log lines. Grep for explicit
+      # hypothesis-accepted messages, expose as a step output so the
+      # follow-up steps (issue creation, workflow failure) can react
+      # independently instead of squishing everything into one `if`.
       - name: Detect verdict
+        id: verdict
         run: |
           LOG=sprt.log
           if grep -qE 'H0 (has been )?accepted|SPRT: (LLR .+ H0 accepted|accepted for H0)' "$LOG"; then
+            echo "verdict=regression" >> "$GITHUB_OUTPUT"
             echo "::error::SPRT accepted H0 — regression vs baseline detected."
-            echo "Investigate the diff between HEAD and the baseline tag."
-            exit 1
-          fi
-          if grep -qE 'H1 (has been )?accepted|SPRT: (LLR .+ H1 accepted|accepted for H1)' "$LOG"; then
+          elif grep -qE 'H1 (has been )?accepted|SPRT: (LLR .+ H1 accepted|accepted for H1)' "$LOG"; then
+            echo "verdict=gain" >> "$GITHUB_OUTPUT"
             echo "::notice::SPRT accepted H1 — Elo improvement confirmed."
             echo "You may want to advance the baseline tag to HEAD after review."
           else
+            echo "verdict=inconclusive" >> "$GITHUB_OUTPUT"
             echo "::notice::SPRT inconclusive at max-games. No verdict either way."
           fi
+
+      # On regression, open a fresh issue OR add a comment to an
+      # existing open issue with the same label. Idempotent: repeated
+      # nightlies confirming the same regression accumulate as comments
+      # on one issue rather than flooding the tracker.
+      - name: Open / update regression issue
+        if: steps.verdict.outputs.verdict == 'regression'
+        env:
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA:     ${{ github.sha }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          REPO:         ${{ github.repository }}
+          SERVER_URL:   ${{ github.server_url }}
+          RUN_ID:       ${{ github.run_id }}
+          TC:           ${{ github.event.inputs.tc || '5+0.05' }}
+          MAX_GAMES:    ${{ github.event.inputs.max_games || '400' }}
+          ELO1:         ${{ github.event.inputs.elo1 || '5' }}
+          LABEL:        nightly-sprt-regression
+        run: |
+          # Ensure label exists — --force also creates on absence and
+          # updates on collision, so the step is idempotent across runs.
+          gh label create "$LABEL" \
+              --description "Nightly SPRT accepted H0 vs the baseline tag" \
+              --color BF0000 --force || true
+
+          RUN_URL="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
+          COMPARE_URL="$SERVER_URL/$REPO/compare/${BASELINE_SHA}...${HEAD_SHA}"
+
+          # Body written to a file so gh --body-file consumes it as-is;
+          # avoids the shell-quoting minefield of embedded log excerpts
+          # (backticks, dollars, quotes) that would corrupt --body="...".
+          {
+            printf 'Nightly SPRT accepted **H0** — regression vs baseline detected.\n\n'
+            printf '| | SHA | \n|---|---|\n'
+            printf '| HEAD     | [`%s`](%s/%s/commit/%s) |\n' "${HEAD_SHA:0:7}"     "$SERVER_URL" "$REPO" "$HEAD_SHA"
+            printf '| Baseline | [`%s`](%s/%s/commit/%s) |\n' "${BASELINE_SHA:0:7}" "$SERVER_URL" "$REPO" "$BASELINE_SHA"
+            printf '\n**Compare**: %s\n\n' "$COMPARE_URL"
+            printf '**Workflow run**: %s (PGN + full log attached as artifacts)\n\n' "$RUN_URL"
+            printf '**SPRT config**: `tc=%s max_games=%s elo0=0 elo1=%s alpha=beta=0.05 concurrency=2`\n\n' "$TC" "$MAX_GAMES" "$ELO1"
+            printf 'Last 80 lines of the SPRT log:\n\n'
+            printf '```\n'
+            tail -80 sprt.log
+            printf '\n```\n\n'
+            printf 'To investigate:\n'
+            printf '1. Download the PGN artifact and inspect games where the tuned engine lost.\n'
+            printf '2. `git log --oneline %s..HEAD` for the range under suspicion.\n' "$BASELINE_SHA"
+            printf '3. If the regression is expected (deliberate trade-off), close this issue with a note and rerun the workflow to refresh the baseline.\n'
+          } > /tmp/issue_body.md
+
+          # Look for an existing open issue with this label. If one
+          # exists, comment on it instead of piling up duplicates.
+          EXISTING=$(gh issue list --label "$LABEL" --state open \
+                        --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Adding comment to existing issue #$EXISTING"
+            gh issue comment "$EXISTING" --body-file /tmp/issue_body.md
+          else
+            echo "Creating new regression issue"
+            gh issue create \
+                --title "Nightly SPRT regression detected" \
+                --label "$LABEL" \
+                --body-file /tmp/issue_body.md
+          fi
+
+      # Fails the workflow AFTER the issue-open step so the tracker
+      # is up-to-date even if this step errors out for any reason.
+      - name: Fail workflow on regression
+        if: steps.verdict.outputs.verdict == 'regression'
+        run: exit 1
 
       - name: Upload PGN
         if: always()
