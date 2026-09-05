@@ -6,9 +6,19 @@
 // mean the position is better for whoever is about to move.
 //
 // Material + PST is O(1) via Position::psq_mg / psq_eg (incremental).
-// Mobility and passed pawns are computed per-call (small: a handful of
-// popcount and bitboard operations each).
-int evaluate(const Position& pos);
+// Mobility and pawn structure are computed per-call (small — pawn
+// structure is pawn-hash cached; mobility is the dominant cost).
+//
+// Lazy eval: when `alpha` and `beta` bracket a window and the cheap
+// material + PST + phase score is already OUTSIDE that window by more
+// than EVAL_LAZY_MARGIN (500 cp), skip the expensive terms and return
+// the lazy score early. Callers pass their alpha-beta window; tests use
+// the wide default (equivalent to no lazy pruning) so pinned values
+// stay stable.
+constexpr int EVAL_UNBOUNDED = 1'000'000;
+int evaluate(const Position& pos,
+             int alpha = -EVAL_UNBOUNDED,
+             int beta  =  EVAL_UNBOUNDED);
 
 // Populate per-square passed-pawn masks. Must be called once at startup
 // before any evaluate() call.

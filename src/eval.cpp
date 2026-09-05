@@ -353,9 +353,31 @@ static int mobility(const Position& pos, Color us) {
     return score;
 }
 
-int evaluate(const Position& pos) {
+// Bound on the total swing the non-lazy terms (mobility + pawn structure
+// + bishop pair) can contribute. Both mobility and pawn structure can
+// each move the score by ~150-200 cp in extremes; bishop pair adds ~50.
+// 500 cp is a conservative sum — larger than any realistic combined
+// swing, so lazy triggers only when material + PST alone is already
+// unambiguously outside the alpha-beta window.
+constexpr int EVAL_LAZY_MARGIN = 500;
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — alpha/beta is standard evaluation-window naming, swapping would be caught by the assertion `alpha <= beta` at the top of the search loop.
+int evaluate(const Position& pos, int alpha, int beta) {
     int mg_diff = pos.psq_mg[WHITE] - pos.psq_mg[BLACK];
     int eg_diff = pos.psq_eg[WHITE] - pos.psq_eg[BLACK];
+    int phase   = compute_phase(pos);
+
+    // Lazy eval: if material + PST alone is already so far outside the
+    // window that even the maximum possible swing from the remaining
+    // terms couldn't bring it back inside, return the lazy score. The
+    // caller's fail-high / fail-low branches will fire on the returned
+    // value exactly as they would on the full score.
+    int lazy_score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
+    int lazy_persp = (pos.side_to_move == WHITE) ? lazy_score : -lazy_score;
+    if (lazy_persp - EVAL_LAZY_MARGIN >= beta ||
+        lazy_persp + EVAL_LAZY_MARGIN <= alpha) {
+        return lazy_persp;
+    }
 
     // Mobility — favor active pieces. Applied at half weight in the
     // endgame because open positions dominate mobility numbers there
@@ -379,7 +401,6 @@ int evaluate(const Position& pos) {
         eg_diff -= BISHOP_PAIR_EG;
     }
 
-    int phase = compute_phase(pos);
     int score = ((mg_diff * phase) + (eg_diff * (PHASE_MAX - phase))) / PHASE_MAX;
     return (pos.side_to_move == WHITE) ? score : -score;
 }
