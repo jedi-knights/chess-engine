@@ -97,6 +97,15 @@ constexpr int HISTORY_MAX = 16'000;
 constexpr int LMP_MAX_DEPTH = 3;
 constexpr int LMP_LIMIT[LMP_MAX_DEPTH + 1] = {0, 4, 8, 12};
 
+// Internal Iterative Reduction: when a deep node has no TT move,
+// ordering falls back to killers/history — much weaker than an actual
+// best-move hint. Rather than do a shallow search to find one (classic
+// IID, which duplicates move-gen work), just cut this node's depth by
+// 1. The search costs less; the accuracy loss is small because bad
+// ordering was going to make full depth inefficient anyway. Used by
+// modern Stockfish/Ethereal in preference to IID.
+constexpr int IIR_MIN_DEPTH = 4;
+
 // Poll for cancellation reasons every ~1024 nodes. Both the wall-clock
 // deadline and the external `stop` flag use this cadence; on every-node
 // checks the syscall/atomic-load overhead would dominate the search on
@@ -558,6 +567,16 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         if (null_score >= beta) {
             return beta;      // fail-high: prune the whole subtree
         }
+    }
+
+    // Internal Iterative Reduction: no TT move at deep-enough depth
+    // means ordering will be weak. Trim depth by 1 rather than spend
+    // the extra plies on an ill-ordered search. Applies after null-move
+    // so null-move sees the original depth (its own gate is depth >= 3).
+    if (tt_move == NULL_MOVE
+        && depth >= IIR_MIN_DEPTH
+        && !node_in_check) {
+        depth -= 1;
     }
 
     MoveList moves;
