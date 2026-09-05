@@ -4,7 +4,7 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
 
 [![CI](https://github.com/jedi-knights/chess-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/ci.yml)
 [![Badge](https://github.com/jedi-knights/chess-engine/actions/workflows/badge.yaml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/badge.yaml)
-[![Coverage](https://img.shields.io/badge/Coverage-96.4%25-brightgreen)](https://jedi-knights.github.io/chess-engine/?v=18)
+[![Coverage](https://img.shields.io/badge/Coverage-96.5%25-brightgreen)](https://jedi-knights.github.io/chess-engine/?v=19)
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 ![Status](https://img.shields.io/badge/status-early--development-orange.svg)
