@@ -37,13 +37,38 @@ int main(int argc, char** argv) {
         if (argc < 3) {
             std::fprintf(stderr,
                 "tune: missing dataset path\n"
-                "usage: %s tune <dataset.txt>\n"
+                "usage: %s tune <dataset.txt> [mode] [iterations]\n"
                 "  dataset format: one line per position, `<FEN>;<outcome>`\n"
-                "  outcome in {0, 0.5, 1} from WHITE's perspective\n",
+                "  outcome in {0, 0.5, 1} from WHITE's perspective\n"
+                "  mode: scalar (default), pst, all\n"
+                "  iterations: SPSA iteration count (default 1000; unused in scalar mode)\n",
                 argv[0]);
             return 1;
         }
-        return tune::run_tune(argv[2]);
+        tune::Mode mode = tune::Mode::Scalar;
+        if (argc >= 4) {
+            if      (std::strcmp(argv[3], "scalar") == 0) { mode = tune::Mode::Scalar; }
+            else if (std::strcmp(argv[3], "pst")    == 0) { mode = tune::Mode::Pst; }
+            else if (std::strcmp(argv[3], "all")    == 0) { mode = tune::Mode::All; }
+            else {
+                std::fprintf(stderr, "tune: unknown mode '%s' (expected scalar|pst|all)\n",
+                             argv[3]);
+                return 1;
+            }
+        }
+        int iterations = 1000;
+        if (argc >= 5) {
+            char* end = nullptr;
+            errno = 0;
+            long parsed = std::strtol(argv[4], &end, 10);
+            if (errno != 0 || end == argv[4] || *end != '\0' || parsed <= 0 || parsed > 1'000'000) {
+                std::fprintf(stderr, "tune: invalid iterations '%s' (expected 1..1000000)\n",
+                             argv[4]);
+                return 1;
+            }
+            iterations = int(parsed);
+        }
+        return tune::run_tune(argv[2], mode, iterations);
     }
 
     uci_loop(std::cin, std::cout);

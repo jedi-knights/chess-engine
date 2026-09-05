@@ -2,9 +2,12 @@
 #include "eval.h"
 #include "position.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -195,20 +198,8 @@ void coord_descent(std::vector<Weight>& weights,
     std::printf("Converged after %d sweep(s).\n", sweep);
 }
 
-}  // namespace
-
-int run_tune(const std::string& dataset_path) {
-    std::vector<Sample> data = load_dataset(dataset_path);
-    if (data.empty()) {
-        std::fprintf(stderr, "tune: empty dataset — nothing to do\n");
-        return 1;
-    }
-    std::printf("Loaded %zu positions from '%s'\n",
-                data.size(), dataset_path.c_str());
-
-    double K = fit_k(data);
-    std::printf("Fitted K = %.6f\n", K);
-
+// Coordinate descent over eval::params (scalar weights + piece values).
+void run_scalar(std::vector<Sample>& data, double K) {
     // Weights exposed for tuning. `lo` / `hi` are search bounds — set
     // wide but not unbounded so a divergent sweep can't run forever.
     // `affects_psq` = true means mutating the weight invalidates the
@@ -242,7 +233,7 @@ int run_tune(const std::string& dataset_path) {
 
     coord_descent(weights, data, K);
 
-    std::printf("\nFinal tuned weights (baseline defaults in parens):\n");
+    std::printf("\nFinal tuned scalar weights (baseline defaults in parens):\n");
     eval::TuningParams defaults;
     for (const auto& w : weights) {
         // Fetch the default by name so the diff is obvious at review.
@@ -267,6 +258,209 @@ int run_tune(const std::string& dataset_path) {
         else if (name == "king_open_file_penalty")       { def = defaults.king_open_file_penalty; }
         else if (name == "king_semi_open_file_penalty")  { def = defaults.king_semi_open_file_penalty; }
         std::printf("  %-30s = %4d   (was %d)\n", w.name, *w.value, def);
+    }
+}
+
+// --- SPSA tuning of the piece-square tables -----------------------------
+// Simultaneous Perturbation Stochastic Approximation (Spall, 1992). For
+// a high-dimensional weight vector θ ∈ ℝ^n, SPSA estimates the gradient
+// from just TWO loss evaluations per iteration regardless of n — a
+// random Bernoulli sign vector Δ perturbs all weights simultaneously,
+// and the finite-difference (L(θ+cΔ) - L(θ-cΔ)) / (2c·Δᵢ) gives an
+// unbiased noisy gradient estimate for each component.
+//
+// PST tuning dimensionality:
+//   6 piece types × 64 squares × 2 phases (MG, EG) = 768 weights.
+// Coordinate descent would need 768×N evaluations per full sweep; SPSA
+// needs 2 evaluations per iteration, converging in 1000-10000 iterations
+// on a real dataset. On our 30-position demo dataset that's ~60k evals
+// vs coord's 46k, so SPSA is comparable in cost but scales to real
+// datasets where coord descent doesn't.
+
+constexpr int PST_DIM = 6 * NUM_SQUARES * 2;   // 6 pieces (PAWN..KING), 64 squares, 2 phases.
+
+// Map an SPSA weight index in [0, PST_DIM) → (phase, pt, sq). Piece
+// types [1..6] map to [0..5] here so index 0 is meaningful.
+void pst_index_to_slot(int i, int& phase, int& pt, int& sq) {
+    phase = i / (6 * NUM_SQUARES);            // 0 = MG, 1 = EG
+    int rem = i % (6 * NUM_SQUARES);
+    pt = 1 + (rem / NUM_SQUARES);             // shift to PAWN..KING
+    sq = rem % NUM_SQUARES;
+}
+
+int  read_pst_slot (int i) {
+    int phase, pt, sq;
+    pst_index_to_slot(i, phase, pt, sq);
+    return (phase == 0) ? eval::pst_mg[pt][sq] : eval::pst_eg[pt][sq];
+}
+
+void write_pst_slot(int i, int value) {
+    int phase, pt, sq;
+    pst_index_to_slot(i, phase, pt, sq);
+    if (phase == 0) { eval::pst_mg[pt][sq] = value; }
+    else            { eval::pst_eg[pt][sq] = value; }
+}
+
+// SPSA hyperparameters, from Spall's "Introduction to Stochastic
+// Search and Optimization" (2003), tuned for this problem size:
+//   α, γ  — decay exponents for learning rate and perturbation.
+//   a, c  — initial magnitudes.
+//   A     — learning-rate stability constant (typically ~10% of N).
+// c chosen large enough that a rounded ±c step actually changes the
+// int-valued weight; a chosen so a * gradient stays in the ~1 cp per
+// iteration range at typical PST scales.
+void spsa_pst(std::vector<Sample>& data, double K, int n_iter) {
+    constexpr double alpha = 0.602;
+    constexpr double gamma = 0.101;
+    // a0 tuned to produce visible theta drift within 1000 iterations
+    // on the demo dataset. Typical MSE-scale gradients are ~1e-3, so
+    // per-iteration update magnitude a_k * g_i ends up ~1-2 units at
+    // k=1 and decays under Spall's schedule. On real 100k-position
+    // datasets the gradient is noisier per iteration but averages more
+    // cleanly; if you see slots stuck at their starting values, lower
+    // a0 and raise n_iter (Spall recommends a0 ~ desired step / typical
+    // gradient magnitude).
+    constexpr double a0    = 5000.0;
+    constexpr double c0    = 6.0;
+    const double A         = std::max(1.0, n_iter * 0.1);
+
+    // Continuous weight vector — keeps sub-integer state between
+    // iterations even though the eval reads int weights via rounding.
+    std::vector<double> theta(PST_DIM);
+    for (int i = 0; i < PST_DIM; ++i) {
+        theta[i] = double(read_pst_slot(i));
+    }
+
+    std::mt19937 rng(1729);   // Ramanujan; deterministic across runs.
+
+    const double initial_mse = compute_mse(data, K);
+    std::printf("SPSA start: %d iterations over %d PST weights, "
+                "initial MSE = %.7f\n",
+                n_iter, PST_DIM, initial_mse);
+
+    // Log every ~10% of the run, plus a final pass.
+    const int log_every = std::max(1, n_iter / 10);
+
+    for (int k = 1; k <= n_iter; ++k) {
+        const double a_k = a0 / std::pow(double(k) + A, alpha);
+        const double c_k = c0 / std::pow(double(k),     gamma);
+
+        // Bernoulli ±1 perturbation vector.
+        std::vector<int> delta(PST_DIM);
+        for (int i = 0; i < PST_DIM; ++i) {
+            delta[i] = (rng() & 1U) ? 1 : -1;
+        }
+
+        // L(θ + cΔ). Round after adding to keep int weights.
+        for (int i = 0; i < PST_DIM; ++i) {
+            write_pst_slot(i, int(std::lround(theta[i] + c_k * delta[i])));
+        }
+        refresh_psq(data);
+        const double L_plus = compute_mse(data, K);
+
+        // L(θ - cΔ).
+        for (int i = 0; i < PST_DIM; ++i) {
+            write_pst_slot(i, int(std::lround(theta[i] - c_k * delta[i])));
+        }
+        refresh_psq(data);
+        const double L_minus = compute_mse(data, K);
+
+        // Gradient estimate and update.
+        // g_i = (L_plus - L_minus) / (2 * c_k * delta[i]);
+        // Since delta[i] = ±1, dividing by delta[i] is multiplying by it.
+        const double diff = L_plus - L_minus;
+        for (int i = 0; i < PST_DIM; ++i) {
+            const double g_i = diff * double(delta[i]) / (2.0 * c_k);
+            theta[i] -= a_k * g_i;
+        }
+
+        // Periodic progress: write theta back for a clean MSE reading.
+        if (k % log_every == 0 || k == n_iter) {
+            for (int i = 0; i < PST_DIM; ++i) {
+                write_pst_slot(i, int(std::lround(theta[i])));
+            }
+            refresh_psq(data);
+            const double cur = compute_mse(data, K);
+            std::printf("SPSA iter %5d/%d: a_k=%.4f c_k=%.4f MSE=%.7f\n",
+                        k, n_iter, a_k, c_k, cur);
+        }
+    }
+
+    // Ensure final state is the rounded theta, not the last probe.
+    for (int i = 0; i < PST_DIM; ++i) {
+        write_pst_slot(i, int(std::lround(theta[i])));
+    }
+    refresh_psq(data);
+    std::printf("SPSA done: final MSE = %.7f (start was %.7f)\n",
+                compute_mse(data, K), initial_mse);
+}
+
+void run_pst(std::vector<Sample>& data, double K, int iterations) {
+    // Snapshot starting PSTs so the summary can report which slots
+    // moved the most. 768 ints is negligible memory.
+    std::vector<int> before(PST_DIM);
+    for (int i = 0; i < PST_DIM; ++i) {
+        before[i] = read_pst_slot(i);
+    }
+
+    spsa_pst(data, K, iterations);
+
+    // Summary: top 10 largest |delta| slots. Real tuning workflows
+    // dump the full pst_mg / pst_eg tables externally and diff —
+    // this is the "did anything meaningful move?" quick-look.
+    struct SlotDelta { int idx; int delta; };
+    std::vector<SlotDelta> deltas;
+    deltas.reserve(PST_DIM);
+    for (int i = 0; i < PST_DIM; ++i) {
+        int d = read_pst_slot(i) - before[i];
+        if (d != 0) {
+            deltas.push_back({i, d});
+        }
+    }
+    std::sort(deltas.begin(), deltas.end(),
+              [](const SlotDelta& a, const SlotDelta& b) {
+                  return std::abs(a.delta) > std::abs(b.delta);
+              });
+
+    std::printf("\nPST tuning summary — %zu slots changed, top 10 by |delta|:\n",
+                deltas.size());
+    static const char* PT_NAME[NUM_PIECE_TYPES] = {
+        "?", "pawn", "knight", "bishop", "rook", "queen", "king",
+    };
+    const int limit = int(std::min<size_t>(deltas.size(), 10));
+    for (int r = 0; r < limit; ++r) {
+        int phase, pt, sq;
+        pst_index_to_slot(deltas[r].idx, phase, pt, sq);
+        const char* phase_name = (phase == 0) ? "MG" : "EG";
+        // sq → file/rank letters for readability.
+        char file_char = char('a' + (sq & 7));
+        char rank_char = char('1' + (sq >> 3));
+        std::printf("  %s %-6s %c%c : %+d\n",
+                    phase_name, PT_NAME[pt], file_char, rank_char,
+                    deltas[r].delta);
+    }
+    std::printf("  (dump eval::pst_mg / eval::pst_eg for the full tables)\n");
+}
+
+}  // namespace
+
+int run_tune(const std::string& dataset_path, Mode mode, int iterations) {
+    std::vector<Sample> data = load_dataset(dataset_path);
+    if (data.empty()) {
+        std::fprintf(stderr, "tune: empty dataset — nothing to do\n");
+        return 1;
+    }
+    std::printf("Loaded %zu positions from '%s'\n",
+                data.size(), dataset_path.c_str());
+
+    const double K = fit_k(data);
+    std::printf("Fitted K = %.6f\n", K);
+
+    if (mode == Mode::Scalar || mode == Mode::All) {
+        run_scalar(data, K);
+    }
+    if (mode == Mode::Pst || mode == Mode::All) {
+        run_pst(data, K, iterations);
     }
     return 0;
 }

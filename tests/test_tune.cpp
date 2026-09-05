@@ -36,3 +36,40 @@ TEST_CASE("tuner runs to convergence on the demo dataset without error") {
     // build order would otherwise inherit tuned params.
     eval::params = snapshot;
 }
+
+TEST_CASE("SPSA PST tuner runs a short pass without corrupting eval") {
+    // 50 iterations is enough to exercise both L+ / L- probes, the
+    // gradient update, and the log-every-N summary path without taking
+    // real tuning time. Snapshot both scalar params AND PST tables so
+    // we can restore fully after — SPSA mutates 768 PST slots plus the
+    // rounded state at exit.
+    const eval::TuningParams params_snapshot = eval::params;
+    int pst_mg_snapshot[NUM_PIECE_TYPES][NUM_SQUARES];
+    int pst_eg_snapshot[NUM_PIECE_TYPES][NUM_SQUARES];
+    for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) {
+        for (int sq = 0; sq < NUM_SQUARES; ++sq) {
+            pst_mg_snapshot[pt][sq] = eval::pst_mg[pt][sq];
+            pst_eg_snapshot[pt][sq] = eval::pst_eg[pt][sq];
+        }
+    }
+
+    const int rc = tune::run_tune("tests/data/tune_demo.txt",
+                                  tune::Mode::Pst, /*iterations=*/50);
+    CHECK(rc == 0);
+
+    // Startpos is color-symmetric under any perturbation SPSA can apply
+    // to WHITE tables (BLACK looks up mirrored squares in the SAME
+    // tables), so the diff cancels: evaluate() must still be 0.
+    Position startpos;
+    REQUIRE(startpos.set_from_fen(STARTPOS_FEN));
+    CHECK(evaluate(startpos) == 0);
+
+    // Restore for downstream tests.
+    eval::params = params_snapshot;
+    for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) {
+        for (int sq = 0; sq < NUM_SQUARES; ++sq) {
+            eval::pst_mg[pt][sq] = pst_mg_snapshot[pt][sq];
+            eval::pst_eg[pt][sq] = pst_eg_snapshot[pt][sq];
+        }
+    }
+}
