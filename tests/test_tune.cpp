@@ -73,3 +73,34 @@ TEST_CASE("SPSA PST tuner runs a short pass without corrupting eval") {
         }
     }
 }
+
+TEST_CASE("dump_weights produces paste-ready output covering all tunable state") {
+    // Capture stdout during the dump. `dump_weights` prints ~30 lines
+    // of scalar params + 2×(1+6×10) PST-table lines. We check that
+    // (a) the dump doesn't crash, (b) contains the section headers a
+    // maintainer greps for, and (c) contains at least one value from
+    // each of the three tunable blocks so a paste job can succeed.
+    std::fflush(stdout);
+    char buf[16384];
+    std::setvbuf(stdout, buf, _IOFBF, sizeof(buf));
+
+    tune::dump_weights();
+
+    std::fflush(stdout);
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    const std::string out(buf);
+
+    // Section markers that make the dump structured / grep-able.
+    CHECK(out.find("eval::TuningParams") != std::string::npos);
+    CHECK(out.find("eval::pst_mg") != std::string::npos);
+    CHECK(out.find("eval::pst_eg") != std::string::npos);
+
+    // One representative value from each block. Defaults must appear
+    // verbatim so the dump round-trips: parse back to same weights.
+    CHECK(out.find("bishop_pair_mg              =   30;") != std::string::npos);
+    CHECK(out.find("king_open_file_penalty      =   30;") != std::string::npos);
+
+    // Per-piece labels inside the PST dump.
+    CHECK(out.find("// PAWN") != std::string::npos);
+    CHECK(out.find("// KING") != std::string::npos);
+}

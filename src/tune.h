@@ -47,4 +47,11 @@ int run_tune(const std::string& dataset_path,
              Mode mode = Mode::Scalar,
              int  iterations = 1000);
 
+// Print the current in-memory eval::params and eval::pst_mg / pst_eg
+// as a paste-ready C++ source fragment. Invoked automatically at the
+// end of run_tune() so tuned weights can be transferred to
+// src/eval.h / src/eval.cpp without hand transcription; also exposed
+// as the `dump-weights` subcommand for baseline inspection.
+void dump_weights();
+
 }  // namespace tune
