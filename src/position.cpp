@@ -103,22 +103,16 @@ bool Position::set_from_fen(const std::string& fen) {
 
     // set_from_fen writes bitboards directly rather than going through
     // put_piece, so the incremental psq accumulators and pawn_key are
-    // still 0. Recompute from scratch — this only runs on set_from_fen /
-    // ucinewgame boundaries so it isn't in the search hot path.
-    psq_mg[WHITE] = psq_mg[BLACK] = 0;
-    psq_eg[WHITE] = psq_eg[BLACK] = 0;
-    pawn_key      = 0;
+    // still 0. Recompute both from scratch — this only runs on
+    // set_from_fen / ucinewgame boundaries so it isn't in the search
+    // hot path. PSQ recompute lives in its own method because the
+    // Texel tuner reuses it after mutating eval weights.
+    recompute_psq();
+    pawn_key = 0;
     for (int c = 0; c < NUM_COLORS; ++c) {
-        for (int pt = PAWN; pt <= KING; ++pt) {
-            Bitboard bb = pieces[c][pt];
-            while (bb != 0U) {
-                Square s = pop_lsb(bb);
-                psq_mg[c] += eval::psq_mg(Color(c), PieceType(pt), s);
-                psq_eg[c] += eval::psq_eg(Color(c), PieceType(pt), s);
-                if (pt == PAWN) {
-                    pawn_key ^= zobrist::PIECE_SQ[c][PAWN][s];
-                }
-            }
+        Bitboard bb = pieces[c][PAWN];
+        while (bb != 0U) {
+            pawn_key ^= zobrist::PIECE_SQ[c][PAWN][pop_lsb(bb)];
         }
     }
 
@@ -194,6 +188,21 @@ static constexpr int CR_MASK[NUM_SQUARES] = {
     15, 15, 15, 15, 15, 15, 15, 15,
      7, 15, 15, 15,  3, 15, 15, 11,   // rank 8 mirror
 };
+
+void Position::recompute_psq() {
+    psq_mg[WHITE] = psq_mg[BLACK] = 0;
+    psq_eg[WHITE] = psq_eg[BLACK] = 0;
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int pt = PAWN; pt <= KING; ++pt) {
+            Bitboard bb = pieces[c][pt];
+            while (bb != 0U) {
+                Square s = pop_lsb(bb);
+                psq_mg[c] += eval::psq_mg(Color(c), PieceType(pt), s);
+                psq_eg[c] += eval::psq_eg(Color(c), PieceType(pt), s);
+            }
+        }
+    }
+}
 
 void Position::put_piece(Square s, Piece p) {
     assert(board[s] == NO_PIECE);

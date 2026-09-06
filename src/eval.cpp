@@ -8,17 +8,10 @@
 
 namespace eval {
 
-// Larry Kaufman's classic centipawn values. King has no material value —
-// it's always on the board and losing it means the game is already over.
-const int PIECE_VALUE[NUM_PIECE_TYPES] = {
-    0,     // NO_PIECE_TYPE
-    100,   // PAWN
-    320,   // KNIGHT
-    330,   // BISHOP
-    500,   // ROOK
-    900,   // QUEEN
-    0,     // KING
-};
+// Kaufman classical piece values live in eval::params.piece_values —
+// see eval.h. Tuning them mutates the psq_mg / psq_eg accumulators'
+// per-position sum, so callers must invoke Position::recompute_psq()
+// on any position whose eval they consume after a change.
 
 // Piece-square tables from the Chess Programming Wiki's "Simplified
 // Evaluation Function" (Michniewski). Values are white-perspective and

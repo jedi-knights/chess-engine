@@ -225,3 +225,33 @@ TEST_CASE("pawn_key: matches recompute from pawn bitboards after every move type
         CHECK(pos.pawn_key == recompute_pawn_key(pos));   // unmake snapshot restores
     }
 }
+
+TEST_CASE("recompute_psq: rebuilds accumulators from bitboards") {
+    // The incremental psq_mg / psq_eg accumulators are maintained by
+    // put_piece / remove_piece as pieces enter and leave the board.
+    // recompute_psq() rebuilds them from scratch — the Texel tuner
+    // calls this after mutating eval::params.piece_values to
+    // invalidate the (now stale) incremental sums. Round-trip test:
+    // corrupt the accumulators to something obviously wrong, then
+    // recompute and verify they match a fresh set_from_fen.
+    for (const auto& fen : STANDARD_FENS) {
+        Position pos;
+        REQUIRE(pos.set_from_fen(fen));
+        const int mg_w = pos.psq_mg[WHITE], mg_b = pos.psq_mg[BLACK];
+        const int eg_w = pos.psq_eg[WHITE], eg_b = pos.psq_eg[BLACK];
+
+        // Corrupt every accumulator so a naive "no-op recompute" would
+        // leave stale values behind.
+        pos.psq_mg[WHITE] = -12345;
+        pos.psq_mg[BLACK] =  99999;
+        pos.psq_eg[WHITE] =  67890;
+        pos.psq_eg[BLACK] = -54321;
+
+        pos.recompute_psq();
+
+        CHECK(pos.psq_mg[WHITE] == mg_w);
+        CHECK(pos.psq_mg[BLACK] == mg_b);
+        CHECK(pos.psq_eg[WHITE] == eg_w);
+        CHECK(pos.psq_eg[BLACK] == eg_b);
+    }
+}
