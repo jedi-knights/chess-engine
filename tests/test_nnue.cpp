@@ -164,7 +164,7 @@ TEST_CASE("NNUE feature_index follows HalfKP layout") {
     CHECK(nnue::feature_index(WHITE, E1, B1, KNIGHT, WHITE) == 2575);
 }
 
-TEST_CASE("NNUE refresh_accumulator is deterministic") {
+TEST_CASE("NNUE force_refresh_accumulator is deterministic") {
     NnueScope scope;
     write_zeroed_network_file("/tmp/nnue_det.jnn1");
     REQUIRE(nnue::load_network("/tmp/nnue_det.jnn1"));
@@ -172,15 +172,216 @@ TEST_CASE("NNUE refresh_accumulator is deterministic") {
     Position pos;
     REQUIRE(pos.set_from_fen(STARTPOS_FEN));
 
-    nnue::Accumulator a, b;
-    nnue::refresh_accumulator(pos, a);
-    nnue::refresh_accumulator(pos, b);
-
-    CHECK(a.computed);
-    CHECK(b.computed);
+    nnue::force_refresh_accumulator(pos);
+    // Snapshot both perspectives so a second refresh can't overwrite
+    // us before the compare.
+    std::array<int32_t, nnue::HIDDEN_SIZE> snapshot[NUM_COLORS];
     for (int c = 0; c < NUM_COLORS; ++c) {
         for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
-            CHECK(a.values[c][i] == b.values[c][i]);
+            snapshot[c][i] = pos.acc.values[c][i];
         }
+        CHECK(pos.acc.computed[c]);
+    }
+
+    nnue::force_refresh_accumulator(pos);
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        CHECK(pos.acc.computed[c]);
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            CHECK(pos.acc.values[c][i] == snapshot[c][i]);
+        }
+    }
+}
+
+namespace {
+
+// Compare two accumulators element-wise for both perspectives.
+bool accs_equal(const nnue::Accumulator& a, const nnue::Accumulator& b) {
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            if (a.values[c][i] != b.values[c][i]) { return false; }
+        }
+    }
+    return true;
+}
+
+// Incremental-update invariant: for `fen`, apply a UCI move token, then
+// compare the resulting `pos.acc` (updated incrementally by put/remove
+// piece + lazy refresh) against a fresh `Position` set from the target
+// FEN whose accumulator is force-refreshed. If they diverge, either the
+// incremental update or the dirty-flag path is wrong. Uses a
+// non-zeroed network so any per-piece delta actually mutates the
+// accumulator (the zeroed network from other tests would falsely pass
+// even if add/sub_piece_from_accumulator were no-ops).
+void check_incremental_matches_full(const std::string& fen_before,
+                                    Move                move,
+                                    const std::string&  fen_after_expected) {
+    Position pos_incremental;
+    REQUIRE(pos_incremental.set_from_fen(fen_before));
+    // Prime the accumulator so the make_move deltas land on a
+    // known-good baseline (otherwise dirty flags mask the incremental
+    // updates entirely).
+    nnue::force_refresh_accumulator(pos_incremental);
+
+    UndoInfo u;
+    pos_incremental.make_move(move, u);
+    // Post-move: king moves left the moved side's perspective dirty;
+    // this call rebuilds it from scratch. Non-king perspectives
+    // should already be clean (kept in sync incrementally).
+    nnue::refresh_accumulator(pos_incremental);
+
+    Position pos_full;
+    REQUIRE(pos_full.set_from_fen(fen_after_expected));
+    nnue::force_refresh_accumulator(pos_full);
+
+    CHECK(accs_equal(pos_incremental.acc, pos_full.acc));
+
+    // Round-trip: unmaking should restore the pre-move accumulator.
+    pos_incremental.unmake_move(move, u);
+    nnue::refresh_accumulator(pos_incremental);
+    Position pos_pre;
+    REQUIRE(pos_pre.set_from_fen(fen_before));
+    nnue::force_refresh_accumulator(pos_pre);
+    CHECK(accs_equal(pos_incremental.acc, pos_pre.acc));
+}
+
+// Build a "not-zero" network in place so incremental delta tests can
+// distinguish "did nothing" from "did the right thing." Pattern:
+// feature_weights[f][h] = (int16_t)(((f * 131) ^ (h * 17)) & 0xFF)
+// — deterministic, well-mixed across (feature, hidden), fits int16.
+void install_patterned_network() {
+    // Load a zeroed baseline so g_network exists, then overwrite via
+    // save_network round-trip after mutating a temp copy on disk.
+    // Simpler: use the file path to write our own patterned network
+    // and load it.
+    const std::string path = "/tmp/nnue_patterned.jnn1";
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    REQUIRE(f != nullptr);
+    constexpr char     MAGIC[4] = {'J', 'N', 'N', '1'};
+    constexpr uint32_t VERSION  = 1;
+    constexpr uint32_t HS       = nnue::HIDDEN_SIZE;
+    constexpr uint32_t TF       = nnue::TOTAL_FEATURES;
+    std::fwrite(MAGIC,    sizeof(MAGIC),   1, f);
+    std::fwrite(&VERSION, sizeof(VERSION), 1, f);
+    std::fwrite(&HS,      sizeof(HS),      1, f);
+    std::fwrite(&TF,      sizeof(TF),      1, f);
+
+    // Feature biases: pattern by hidden index only.
+    std::array<int16_t, nnue::HIDDEN_SIZE> biases{};
+    for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+        biases[i] = int16_t((i * 7) & 0x7F);
+    }
+    std::fwrite(biases.data(), sizeof(int16_t), biases.size(), f);
+
+    // Feature weights: 41024 rows × 256 cols. Stream a row at a
+    // time so we don't allocate the whole 20 MiB array.
+    std::array<int16_t, nnue::HIDDEN_SIZE> row{};
+    for (int fi = 0; fi < nnue::TOTAL_FEATURES; ++fi) {
+        for (int h = 0; h < nnue::HIDDEN_SIZE; ++h) {
+            row[h] = int16_t(((fi * 131) ^ (h * 17)) & 0xFF);
+        }
+        std::fwrite(row.data(), sizeof(int16_t), row.size(), f);
+    }
+
+    std::array<int16_t, 2 * nnue::HIDDEN_SIZE> out_w{};
+    for (int i = 0; i < int(out_w.size()); ++i) {
+        out_w[i] = int16_t((i * 3) & 0xFF);
+    }
+    std::fwrite(out_w.data(), sizeof(int16_t), out_w.size(), f);
+
+    int16_t out_b = 1;
+    std::fwrite(&out_b, sizeof(int16_t), 1, f);
+    std::fclose(f);
+
+    REQUIRE(nnue::load_network(path));
+}
+
+}  // namespace
+
+TEST_CASE("NNUE incremental accumulator matches full recompute") {
+    NnueScope scope;
+    install_patterned_network();
+
+    SUBCASE("quiet knight move") {
+        // Startpos, 1. Nf3.
+        Move m = make_move(G1, F3);
+        check_incremental_matches_full(
+            STARTPOS_FEN,
+            m,
+            "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1");
+    }
+
+    SUBCASE("pawn double push") {
+        Move m = make_move(E2, E4);
+        check_incremental_matches_full(
+            STARTPOS_FEN,
+            m,
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+    }
+
+    SUBCASE("capture") {
+        // 4. Nxe5 in a Petroff-like line.
+        const std::string fen =
+            "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3";
+        Move m = make_move(F3, E5);
+        check_incremental_matches_full(
+            fen,
+            m,
+            "rnbqkb1r/pppp1ppp/5n2/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq - 0 3");
+    }
+
+    SUBCASE("king move (dirty flag path)") {
+        // Move white king one square — invalidates ONLY white's
+        // perspective. Black perspective should stay clean and
+        // still match the full recompute.
+        const std::string fen =
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1";
+        Move m = make_move(E1, E2);
+        check_incremental_matches_full(
+            fen,
+            m,
+            "4k3/8/8/8/8/8/4K3/8 b - - 1 1");
+    }
+
+    SUBCASE("castling kingside") {
+        // King + rook move together — king dirties its side, rook
+        // updates incrementally.
+        const std::string fen =
+            "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 4 4";
+        Move m = make_move(E1, G1, MT_CASTLING);
+        check_incremental_matches_full(
+            fen,
+            m,
+            "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 b kq - 5 4");
+    }
+
+    SUBCASE("en passant") {
+        // White pawn on e5 captures black pawn on d5 en passant → e6.
+        const std::string fen =
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3";
+        Move m = make_move(E5, D6, MT_EN_PASSANT);
+        check_incremental_matches_full(
+            fen,
+            m,
+            "rnbqkbnr/ppp1pppp/3P4/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 3");
+    }
+
+    SUBCASE("promotion") {
+        // White pawn on a7 promotes to queen on a8.
+        const std::string fen = "4k3/P7/8/8/8/8/8/4K3 w - - 0 1";
+        Move m = make_move(A7, A8, MT_PROMOTION, QUEEN);
+        check_incremental_matches_full(
+            fen,
+            m,
+            "Q3k3/8/8/8/8/8/8/4K3 b - - 0 1");
+    }
+
+    SUBCASE("capture-promotion") {
+        // White pawn on b7 captures a rook on a8 and promotes to queen.
+        const std::string fen = "r3k3/1P6/8/8/8/8/8/4K3 w - - 0 1";
+        Move m = make_move(B7, A8, MT_PROMOTION, QUEEN);
+        check_incremental_matches_full(
+            fen,
+            m,
+            "Q3k3/8/8/8/8/8/8/4K3 b - - 0 1");
     }
 }
