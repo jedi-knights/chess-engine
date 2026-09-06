@@ -64,22 +64,24 @@ extern TuningParams params;
 // psq_mg / psq_eg incrementally. Not intended for other consumers.
 namespace eval {
 
-extern const int* const PST_MG_TABLE[NUM_PIECE_TYPES];
-extern const int* const PST_EG_TABLE[NUM_PIECE_TYPES];
+// MG and EG PSTs, split per piece type. Michniewski originally used
+// identical MG/EG for P/N/B/R/Q (only KING differed); the split lets
+// the SPSA tuner discover phase-specific placement values. Mutable so
+// the tuner can adjust — callers must invoke Position::recompute_psq()
+// on any position whose eval they consume after a change.
+extern int pst_mg[NUM_PIECE_TYPES][NUM_SQUARES];
+extern int pst_eg[NUM_PIECE_TYPES][NUM_SQUARES];
 
 // Combined material + PST for one piece at one square, from `c`'s
 // perspective (black's tables are the vertical mirror of white's).
 // Inline so the make/unmake hot path pays no function-call cost.
-// Reads material from eval::params so the tuner can mutate values at
-// runtime; PST tables remain constexpr for now (tuning them would
-// require 384*2 additional weight entries).
 inline int psq_mg(Color c, PieceType pt, Square sq) {
     Square lookup = (c == WHITE) ? sq : Square(int(sq) ^ 56);
-    return params.piece_values[pt] + PST_MG_TABLE[pt][lookup];
+    return params.piece_values[pt] + pst_mg[pt][lookup];
 }
 inline int psq_eg(Color c, PieceType pt, Square sq) {
     Square lookup = (c == WHITE) ? sq : Square(int(sq) ^ 56);
-    return params.piece_values[pt] + PST_EG_TABLE[pt][lookup];
+    return params.piece_values[pt] + pst_eg[pt][lookup];
 }
 
 }  // namespace eval
