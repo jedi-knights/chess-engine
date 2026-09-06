@@ -25,6 +25,16 @@
 // Prints iteration progress and final tuned values to stdout; does NOT
 // persist changes across process boundaries. Returns 0 on success,
 // non-zero on failure (missing file, empty dataset, malformed line).
+//
+// End-to-end workflow — Texel loss ≠ Elo, so tuned weights must be
+// SPRT-validated before shipping:
+//   1. scripts/fetch_tuning_dataset.py            (once)
+//   2. make && cp engine engine.baseline          (snapshot pre-tune)
+//   3. ./engine tune tests/data/quiet-labeled.txt all 10000
+//      → copy printed weights into src/eval.cpp / src/eval.h
+//   4. make                                       (rebuild with tuned weights)
+//   5. scripts/sprt.py --baseline engine.baseline --tuned engine
+//      → wait for SPRT to accept H0 (no gain) or H1 (Elo gain)
 namespace tune {
 
 enum class Mode {
