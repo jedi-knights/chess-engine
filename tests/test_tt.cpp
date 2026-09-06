@@ -113,19 +113,91 @@ TEST_CASE("collision: different key in the same slot doesn't cross-contaminate")
     CHECK(tt.probe(0x20, 5, -100, 100, score, move) == false);
 }
 
-TEST_CASE("collision with always-replace: new store overwrites the previous slot entry") {
-    // Same slot collision → the second store wins (always-replace policy).
-    // A subsequent probe of the FIRST key must miss.
+TEST_CASE("two-slot bucket: two colliding keys coexist across both slots") {
+    // With 2-slot buckets, two same-bucket colliding keys occupy both
+    // slots — probing either key still hits. This replaces the previous
+    // single-slot always-replace behavior.
     TranspositionTable tt(TEST_TT_BITS);
     tt.store(0x10, 5, 42, ::make_move(E2, E4), TT_EXACT);
-    tt.store(0x20, 5, 99, ::make_move(D2, D4), TT_EXACT);   // same slot as 0x10
+    tt.store(0x20, 5, 99, ::make_move(D2, D4), TT_EXACT);   // same bucket as 0x10
 
     int  score = 0;
     Move move  = NULL_MOVE;
-    CHECK(tt.probe(0x10, 5, -100, 100, score, move) == false);   // evicted
-    CHECK(tt.probe(0x20, 5, -100, 100, score, move) == true);    // still there
+    CHECK(tt.probe(0x10, 5, -100, 100, score, move) == true);
+    CHECK(score == 42);
+    CHECK(move  == ::make_move(E2, E4));
+    CHECK(tt.probe(0x20, 5, -100, 100, score, move) == true);
     CHECK(score == 99);
     CHECK(move  == ::make_move(D2, D4));
+}
+
+TEST_CASE("depth-preferred eviction: 3rd colliding store evicts the shallowest slot") {
+    // Both bucket slots occupied by same-generation entries; a third
+    // store on the same bucket evicts the lower-depth slot. Keys 0x10,
+    // 0x20, 0x30 all hit bucket 0 (low 3 bits zero) once TEST_TT_BITS=4
+    // resolves to 8 two-slot buckets.
+    TranspositionTable tt(TEST_TT_BITS);
+    tt.new_search();
+    tt.store(0x10, /*depth=*/9, 42, ::make_move(E2, E4), TT_EXACT);   // deep
+    tt.store(0x20, /*depth=*/2, 99, ::make_move(D2, D4), TT_EXACT);   // shallow
+    tt.store(0x30, /*depth=*/5, 77, ::make_move(C2, C4), TT_EXACT);   // medium — evicts the depth=2 slot
+
+    int  score = 0;
+    Move move  = NULL_MOVE;
+    CHECK(tt.probe(0x10, 9, -100, 100, score, move) == true);
+    CHECK(score == 42);                                              // deep entry survives
+    CHECK(tt.probe(0x20, 2, -100, 100, score, move) == false);       // shallow entry evicted
+    CHECK(tt.probe(0x30, 5, -100, 100, score, move) == true);
+    CHECK(score == 77);
+}
+
+TEST_CASE("generation aging: stale deep entries lose to fresh shallow ones after new_search bumps") {
+    // A fresh depth-3 store beats a stale depth-9 entry because the
+    // age penalty (8) drops the stale entry's effective priority to
+    // 9 - 8 = 1. A fresh depth-2 store would NOT beat it (2 < 9-8=1
+    // wait: 2 vs 1 — the fresh depth-2 would still beat it; the test
+    // uses depth-3 to make the margin obvious).
+    TranspositionTable tt(TEST_TT_BITS);
+    tt.new_search();
+    tt.store(0x10, /*depth=*/9, 42, ::make_move(E2, E4), TT_EXACT);
+    tt.store(0x20, /*depth=*/9, 99, ::make_move(D2, D4), TT_EXACT);
+
+    tt.new_search();   // both entries above are now one generation stale
+    tt.store(0x30, /*depth=*/3, 77, ::make_move(C2, C4), TT_EXACT);
+
+    int  score = 0;
+    Move move  = NULL_MOVE;
+    CHECK(tt.probe(0x30, 3, -100, 100, score, move) == true);
+    CHECK(score == 77);
+    // One of the two stale entries got evicted. Both had equal
+    // (depth, generation) so tie-breaking is implementation defined
+    // (first-slot preference); we just check exactly one survives.
+    bool hit10 = tt.probe(0x10, 9, -100, 100, score, move);
+    bool hit20 = tt.probe(0x20, 9, -100, 100, score, move);
+    CHECK((hit10 != hit20));
+}
+
+TEST_CASE("depth-preferred eviction protects the deepest entry under repeated shallow pressure") {
+    // Ethereal/Stockfish-style guarantee: the deepest entry in a
+    // bucket survives repeated shallow leaf-store pressure. Store one
+    // deep entry, then many shallow stores at the same bucket; the
+    // deep entry must remain probeable throughout.
+    TranspositionTable tt(TEST_TT_BITS);
+    tt.new_search();
+    tt.store(0x10, /*depth=*/12, 42, ::make_move(E2, E4), TT_EXACT);
+
+    // 20 shallow stores at same-bucket keys. Each pair fills slot 1
+    // then evicts itself; the deep entry in slot 0 is never touched.
+    for (int i = 0; i < 20; ++i) {
+        uint64_t shallow_key = 0x20 + (uint64_t(i) << 8);   // same bucket, distinct keys
+        tt.store(shallow_key, /*depth=*/1, 0, NULL_MOVE, TT_EXACT);
+    }
+
+    int  score = 0;
+    Move move  = NULL_MOVE;
+    CHECK(tt.probe(0x10, 12, -100, 100, score, move) == true);
+    CHECK(score == 42);
+    CHECK(move  == ::make_move(E2, E4));
 }
 
 TEST_CASE("table size is a power of two matching the constructor argument") {
