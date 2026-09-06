@@ -1,5 +1,6 @@
 #include "uci.h"
 #include "movegen.h"
+#include "nnue.h"
 #include "notation.h"
 #include "position.h"
 #include "search.h"
@@ -49,7 +50,45 @@ void cmd_uci(std::ostream& out) {
     emit(out,
          "id name jedi-engine 0.0.1\n"
          "id author omar\n"
+         "option name UseNNUE type check default false\n"
+         "option name EvalFile type string default <empty>\n"
          "uciok\n");
+}
+
+// Minimal `setoption` handler for the two NNUE knobs. Anything else
+// is silently ignored — same behavior as stockfish for unknown names.
+void cmd_setoption(std::istringstream& is, std::ostream& out) {
+    // Expected form: `setoption name X value Y`
+    std::string tok, name_val;
+    if (!(is >> tok) || tok != "name") { return; }
+    // Option names can be multi-word (though ours aren't).
+    std::string name, value;
+    while (is >> tok && tok != "value") {
+        if (!name.empty()) { name += ' '; }
+        name += tok;
+    }
+    std::getline(is, value);
+    // Trim leading whitespace on value.
+    size_t v0 = value.find_first_not_of(" \t");
+    value = (v0 == std::string::npos) ? "" : value.substr(v0);
+
+    if (name == "UseNNUE") {
+        const bool on = (value == "true" || value == "True" || value == "1");
+        nnue::set_use_nnue(on);
+        if (on && !nnue::is_loaded()) {
+            emit(out, "info string UseNNUE=true but no network loaded — "
+                      "falling back to classical eval\n");
+        }
+    } else if (name == "EvalFile") {
+        if (value.empty() || value == "<empty>") {
+            emit(out, "info string EvalFile is empty — NNUE disabled\n");
+        } else if (nnue::load_network(value)) {
+            emit(out, "info string EvalFile loaded: " + value + "\n");
+        } else {
+            emit(out, "info string EvalFile load FAILED: " + value +
+                      " — classical eval retained\n");
+        }
+    }
 }
 
 void cmd_isready(std::ostream& out) {
@@ -259,6 +298,7 @@ void uci_loop(std::istream& in, std::ostream& out) {
         is >> cmd;
         if      (cmd == "uci")        { cmd_uci(out); }
         else if (cmd == "isready")    { cmd_isready(out); }
+        else if (cmd == "setoption")  { cmd_setoption(is, out); }
         else if (cmd == "ucinewgame") { wait_for_search();
                                         pos.set_from_fen(STARTPOS_FEN);
                                         clear_transposition_table(); }

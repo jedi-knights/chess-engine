@@ -2,6 +2,7 @@
 #include "attacks.h"
 #include "bitboard.h"
 #include "magic.h"
+#include "nnue.h"
 #include "types.h"
 
 #include <algorithm>
@@ -706,6 +707,14 @@ constexpr int EVAL_LAZY_MARGIN = 1200;
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) — alpha/beta is standard evaluation-window naming, swapping would be caught by the assertion `alpha <= beta` at the top of the search loop.
 int evaluate(const Position& pos, int alpha, int beta) {
+    // NNUE takes precedence when a network is loaded AND the UCI
+    // toggle is on. Fallback to classical when either is false so a
+    // missing / mis-typed EvalFile keeps the engine playable at
+    // classical strength.
+    if (nnue::use_nnue()) {
+        return nnue::evaluate(pos);
+    }
+
     int mg_diff = pos.psq_mg[WHITE] - pos.psq_mg[BLACK];
     int eg_diff = pos.psq_eg[WHITE] - pos.psq_eg[BLACK];
     int phase   = compute_phase(pos);
