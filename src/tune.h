@@ -7,6 +7,10 @@
 // perspective), fits a sigmoid scale constant K, then optimizes eval
 // weights to minimize mean-squared prediction error.
 //
+// A 30-position demo dataset is checked in at tests/data/tune_demo.txt
+// for CI; for real tuning, fetch Zurichess quiet-labeled (or a similar
+// EPD corpus) via `scripts/fetch_tuning_dataset.py`.
+//
 // Modes:
 //   scalar (default) — coordinate descent over eval::params (13 scalar
 //                      weights + 5 piece values). Fast; suitable for

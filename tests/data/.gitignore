@@ -1,0 +1,7 @@
+# Downloaded/generated tuning datasets — not source of truth.
+# The demo dataset (tune_demo.txt) is checked in for CI; anything
+# else this dir accumulates is a fetch artifact from
+# scripts/fetch_tuning_dataset.py.
+.cache/
+quiet-labeled.txt
+*.epd
