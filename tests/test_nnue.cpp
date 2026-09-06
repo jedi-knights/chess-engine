@@ -1,17 +1,7 @@
-// NNUE scaffolding tests. Pins the runtime plumbing — load / gate /
-// refresh / fallback — without asserting anything about eval quality
-// (network is a zeroed placeholder in this scaffolding commit).
-//
-// What we verify:
-//   1. Default state — not loaded, use_nnue() is false.
-//   2. Bad path → load fails, loaded state unchanged.
-//   3. Non-Stockfish magic → load fails.
-//   4. SF magic header → load succeeds, use_nnue() gated on the toggle.
-//   5. Feature-index layout follows HalfKP: king_sq * 641 + piece_sq * 10 + slot.
-//   6. refresh_accumulator is deterministic for a given (position, network).
-//
-// Explicitly NOT verified: eval scores are meaningful (they're all 0
-// with a zeroed placeholder net), or that the score matches classical.
+// NNUE runtime tests. Covers the binary format loader + saver, gate
+// semantics, HalfKP feature-index layout, and accumulator determinism.
+// Deliberately does NOT test eval quality — the network is
+// zero-initialized until the training pipeline lands.
 
 #include "doctest.h"
 
@@ -19,33 +9,46 @@
 #include "position.h"
 
 #include <array>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
 namespace {
 
-// Writes a minimal file with the Stockfish HalfKP magic prefix.
-// Padding is zeros — enough to satisfy the scaffolding loader; a real
-// parse would demand the full binary layout.
-void write_sf_stub(const std::string& path) {
-    constexpr uint32_t SF_MAGIC = 0x7AF32F16;
+// Write a minimal but VALID JNN1 file — all-zero weights past the
+// header. Sized to match the current HIDDEN_SIZE / TOTAL_FEATURES
+// (~20 MiB); tests that only need the header can truncate below.
+void write_zeroed_network_file(const std::string& path) {
+    constexpr char     MAGIC[4] = {'J', 'N', 'N', '1'};
+    constexpr uint32_t VERSION  = 1;
+    constexpr uint32_t HS       = nnue::HIDDEN_SIZE;
+    constexpr uint32_t TF       = nnue::TOTAL_FEATURES;
+
     std::FILE* f = std::fopen(path.c_str(), "wb");
     REQUIRE(f != nullptr);
-    std::fwrite(&SF_MAGIC, sizeof(SF_MAGIC), 1, f);
-    // Extra zero padding to make the file look non-trivially sized.
-    const std::array<uint8_t, 128> zeros{};
-    std::fwrite(zeros.data(), zeros.size(), 1, f);
+    std::fwrite(MAGIC,     sizeof(MAGIC),   1, f);
+    std::fwrite(&VERSION,  sizeof(VERSION), 1, f);
+    std::fwrite(&HS,       sizeof(HS),      1, f);
+    std::fwrite(&TF,       sizeof(TF),      1, f);
+    // Feature biases + weights + output weights + output bias.
+    const size_t bytes =
+          size_t(HS) * sizeof(int16_t)
+        + size_t(TF) * HS * sizeof(int16_t)
+        + size_t(2) * HS * sizeof(int16_t)
+        + sizeof(int16_t);
+    // Chunked zero-write so we don't allocate a 20 MiB heap array.
+    std::array<char, 65536> zeros{};
+    size_t remaining = bytes;
+    while (remaining > 0) {
+        size_t n = std::min(remaining, zeros.size());
+        std::fwrite(zeros.data(), 1, n, f);
+        remaining -= n;
+    }
     std::fclose(f);
 }
 
-// RAII: snapshot NNUE global toggle state, restore on destruction so
-// tests running after this one aren't affected. `is_loaded()` state
-// is process-global and NOT restored — once you load a network in a
-// test it stays loaded. That's fine for the current test set (all
-// downstream tests either don't care or check the fallback path
-// which gates on use_nnue not is_loaded).
+// RAII: snapshot NNUE toggle state, restore on destruction.
 struct NnueScope {
     bool prev_use;
     NnueScope() : prev_use(nnue::use_nnue()) { nnue::set_use_nnue(false); }
@@ -54,75 +57,117 @@ struct NnueScope {
 
 }  // namespace
 
-TEST_CASE("NNUE: default state is off + not loaded") {
+TEST_CASE("NNUE: default state is off") {
     NnueScope scope;
-    CHECK_FALSE(nnue::use_nnue());   // toggle off unless explicitly enabled
-    // is_loaded() may be true if an earlier test loaded a stub; we
-    // just verify the composite `use_nnue()` gate is false.
+    // The gate is the composite of use_nnue toggle AND is_loaded state;
+    // by default with no explicit load, this must be false so eval
+    // falls through to classical.
+    nnue::set_use_nnue(false);
+    CHECK_FALSE(nnue::use_nnue());
 }
 
-TEST_CASE("NNUE: load fails on missing file") {
+TEST_CASE("NNUE load: fails on missing file") {
     NnueScope scope;
     CHECK_FALSE(nnue::load_network("/tmp/definitely-does-not-exist.nnue"));
 }
 
-TEST_CASE("NNUE: load fails on file without Stockfish magic") {
+TEST_CASE("NNUE load: fails on bad magic") {
     NnueScope scope;
     const std::string path = "/tmp/nnue_bad_magic.bin";
     std::FILE* f = std::fopen(path.c_str(), "wb");
     REQUIRE(f != nullptr);
-    const uint32_t not_magic = 0xDEADBEEF;
-    std::fwrite(&not_magic, sizeof(not_magic), 1, f);
+    // "XXXX" as magic — anything other than JNN1.
+    std::fwrite("XXXX", 4, 1, f);
+    // Even with junk padding, magic-check should reject before
+    // reading further.
+    std::array<char, 128> zeros{};
+    std::fwrite(zeros.data(), zeros.size(), 1, f);
     std::fclose(f);
     CHECK_FALSE(nnue::load_network(path));
 }
 
-TEST_CASE("NNUE: load succeeds on Stockfish-magic stub") {
+TEST_CASE("NNUE load: fails on truncated header") {
     NnueScope scope;
-    write_sf_stub("/tmp/nnue_sf_stub.nnue");
-    CHECK(nnue::load_network("/tmp/nnue_sf_stub.nnue"));
+    const std::string path = "/tmp/nnue_truncated_header.bin";
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    REQUIRE(f != nullptr);
+    // Only 4 bytes — magic without any of the four uint32 header fields.
+    std::fwrite("JNN1", 4, 1, f);
+    std::fclose(f);
+    CHECK_FALSE(nnue::load_network(path));
+}
+
+TEST_CASE("NNUE load: fails on architecture mismatch") {
+    NnueScope scope;
+    const std::string path = "/tmp/nnue_arch_mismatch.bin";
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    REQUIRE(f != nullptr);
+    constexpr char MAGIC[4] = {'J', 'N', 'N', '1'};
+    constexpr uint32_t VERSION = 1;
+    constexpr uint32_t WRONG_HS = nnue::HIDDEN_SIZE + 1;
+    constexpr uint32_t WRONG_TF = nnue::TOTAL_FEATURES;
+    std::fwrite(MAGIC,     4, 1, f);
+    std::fwrite(&VERSION,  sizeof(VERSION), 1, f);
+    std::fwrite(&WRONG_HS, sizeof(WRONG_HS), 1, f);
+    std::fwrite(&WRONG_TF, sizeof(WRONG_TF), 1, f);
+    std::fclose(f);
+    CHECK_FALSE(nnue::load_network(path));
+}
+
+TEST_CASE("NNUE load: succeeds on well-formed zeroed network") {
+    NnueScope scope;
+    write_zeroed_network_file("/tmp/nnue_zeroed.jnn1");
+    CHECK(nnue::load_network("/tmp/nnue_zeroed.jnn1"));
     CHECK(nnue::is_loaded());
     // Gate: use_nnue is false until explicitly toggled.
     CHECK_FALSE(nnue::use_nnue());
     nnue::set_use_nnue(true);
     CHECK(nnue::use_nnue());
-    // Toggle back before scope exit restores; ensures the "and" gate.
     nnue::set_use_nnue(false);
     CHECK_FALSE(nnue::use_nnue());
 }
 
-TEST_CASE("NNUE: feature_index follows HalfKP layout") {
-    // HalfKP: idx = king_sq * 641 + piece_sq * 10 + slot
-    // Slot depends on (perspective, piece_color, piece_type).
-    // Spot-check three cases.
-    //
-    // White king on E1, white pawn on E2, WHITE perspective:
-    //   king_sq = E1 = 4, piece_sq = E2 = 12, slot = own pawn = 0
-    //   idx = 4 * 641 + 12 * 10 + 0 = 2564 + 120 + 0 = 2684
+TEST_CASE("NNUE save/load round-trip preserves the network") {
+    NnueScope scope;
+    // Load a zeroed baseline first — this gives us g_network to save.
+    write_zeroed_network_file("/tmp/nnue_rt_baseline.jnn1");
+    REQUIRE(nnue::load_network("/tmp/nnue_rt_baseline.jnn1"));
+
+    // Snapshot the eval on a canonical position (should be 0 for the
+    // zeroed net regardless — but this pins the pre-round-trip value
+    // so we can confirm it doesn't shift after save/load).
+    Position startpos;
+    REQUIRE(startpos.set_from_fen(STARTPOS_FEN));
+    nnue::set_use_nnue(true);
+    const int eval_before = nnue::evaluate(startpos);
+
+    // Round trip: save → load a fresh path → eval matches.
+    REQUIRE(nnue::save_network("/tmp/nnue_rt_dumped.jnn1"));
+    REQUIRE(nnue::load_network("/tmp/nnue_rt_dumped.jnn1"));
+    const int eval_after = nnue::evaluate(startpos);
+
+    CHECK(eval_before == eval_after);
+}
+
+TEST_CASE("NNUE feature_index follows HalfKP layout") {
+    // HalfKP: idx = king_sq * 641 + piece_sq * 10 + slot.
+    // Same three spot-checks as scaffolding — regression guard on
+    // any future orientation / slot-mapping change.
+
+    // White king on E1, white pawn on E2, WHITE perspective.
     CHECK(nnue::feature_index(WHITE, E1, E2, PAWN, WHITE) == 2684);
 
-    // Same board, BLACK perspective: king_sq oriented flips ranks,
-    // piece_sq flips ranks, piece is "enemy" from black's POV.
-    //   king_sq = E1 = 4  → oriented for black = 4 XOR 56 = 60 (E8)
-    //   piece_sq = E2 = 12 → oriented = 12 XOR 56 = 52 (E7)
-    //   slot = enemy pawn = 5 (PIECES_PER_SIDE)
-    //   idx = 60 * 641 + 52 * 10 + 5 = 38460 + 520 + 5 = 38985
+    // Same board, BLACK perspective: squares mirror; piece is enemy.
     CHECK(nnue::feature_index(BLACK, E1, E2, PAWN, WHITE) == 38985);
 
-    // White knight on B1, WHITE perspective (king E1):
-    //   slot = own knight = 1
-    //   idx = 4 * 641 + 1 * 10 + 1 = 2564 + 10 + 1 = 2575
+    // White knight on B1, WHITE perspective.
     CHECK(nnue::feature_index(WHITE, E1, B1, KNIGHT, WHITE) == 2575);
 }
 
-TEST_CASE("NNUE: refresh_accumulator is deterministic") {
-    // With the scaffolding's zeroed network, both accumulators end
-    // up all-zero after refresh (biases are 0, weight columns are 0).
-    // The determinism check is that a second refresh produces
-    // identical bits.
+TEST_CASE("NNUE refresh_accumulator is deterministic") {
     NnueScope scope;
-    write_sf_stub("/tmp/nnue_sf_stub.nnue");
-    REQUIRE(nnue::load_network("/tmp/nnue_sf_stub.nnue"));
+    write_zeroed_network_file("/tmp/nnue_det.jnn1");
+    REQUIRE(nnue::load_network("/tmp/nnue_det.jnn1"));
 
     Position pos;
     REQUIRE(pos.set_from_fen(STARTPOS_FEN));

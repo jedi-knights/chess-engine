@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <memory>
 
@@ -90,44 +91,137 @@ bool is_loaded() { return g_loaded; }
 bool use_nnue()  { return g_use_nnue && g_loaded; }
 void set_use_nnue(bool on) { g_use_nnue = on; }
 
-// v1 loader: accept any file whose first 4 bytes are the Stockfish
-// magic. Real weight parsing is deferred — for now we allocate a
-// zero-initialized network and mark loaded, so the runtime path is
-// exercised (returns 0 for every position, which is honest given the
-// stub). Full binary parse comes in the next commit.
+// Custom binary format for this engine's HalfKP-256-1 architecture.
+// SF-compatible parsing was rejected because (a) SF uses a different
+// architecture (41024→256×2→32→32→1 in SF12; even bigger in modern
+// SF), (b) SF quantization scales don't apply to our int32-accumulator
+// runtime, (c) even loading SF12 weights, our missing hidden layers
+// would produce nonsense output. When the training pipeline lands
+// (future PR), it emits this format.
+//
+// Layout (all little-endian):
+//   0x00: 4 bytes  ASCII "JNN1" — magic, so `file` / `hexdump` are legible
+//   0x04: 4 bytes  uint32 format_version (currently 1)
+//   0x08: 4 bytes  uint32 hidden_size — must equal HIDDEN_SIZE
+//   0x0C: 4 bytes  uint32 total_features — must equal TOTAL_FEATURES
+//   0x10: int16 feature_biases[HIDDEN_SIZE]
+//   ....: int16 feature_weights[TOTAL_FEATURES][HIDDEN_SIZE]
+//   ....: int16 output_weights[2 * HIDDEN_SIZE]
+//   ....: int16 output_bias
+//
+// Total on disk: 16 + 2*HIDDEN_SIZE + 2*TOTAL_FEATURES*HIDDEN_SIZE
+//              + 2*2*HIDDEN_SIZE + 2
+//              = 16 + 512 + 21,004,288 + 1024 + 2 ≈ 20 MiB.
+//
+// All header fields are validated. Architecture-mismatch is rejected
+// rather than silently reinterpreted.
+constexpr char     FILE_MAGIC[4]      = {'J', 'N', 'N', '1'};
+constexpr uint32_t FORMAT_VERSION     = 1;
+
 bool load_network(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "nnue: cannot open '%s'\n", path.c_str());
         return false;
     }
-    uint32_t magic = 0;
-    f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    // Header.
+    char magic[4] = {};
+    uint32_t version = 0, hs = 0, tf = 0;
+    f.read(magic, sizeof(magic));
+    f.read(reinterpret_cast<char*>(&version), sizeof(version));
+    f.read(reinterpret_cast<char*>(&hs), sizeof(hs));
+    f.read(reinterpret_cast<char*>(&tf), sizeof(tf));
     if (!f) {
-        std::fprintf(stderr, "nnue: '%s' too short to read magic\n", path.c_str());
+        std::fprintf(stderr, "nnue: '%s' truncated header\n", path.c_str());
         return false;
     }
-    // Stockfish 12+ NNUE version magic (little-endian). Anything else
-    // is rejected — better a clear "unsupported" than random weights.
-    constexpr uint32_t SF_MAGIC = 0x7AF32F16;
-    if (magic != SF_MAGIC) {
+    if (std::memcmp(magic, FILE_MAGIC, 4) != 0) {
         std::fprintf(stderr,
-            "nnue: '%s' magic 0x%08X != expected 0x%08X — scaffolding "
-            "accepts Stockfish HalfKP header only; real weight parse "
-            "is a follow-up commit\n",
-            path.c_str(), magic, SF_MAGIC);
+            "nnue: '%s' magic \"%c%c%c%c\" != expected \"JNN1\"\n",
+            path.c_str(), magic[0], magic[1], magic[2], magic[3]);
         return false;
     }
-    // Real parse skipped — allocate a zeroed network so the eval
-    // path returns a defined value (0 cp for every position) rather
-    // than garbage. This makes SPRT vs classical measure "runtime
-    // works" not "runtime produces meaningful scores."
-    g_network = std::make_unique<Network>();
+    if (version != FORMAT_VERSION) {
+        std::fprintf(stderr,
+            "nnue: '%s' format version %u != expected %u\n",
+            path.c_str(), version, FORMAT_VERSION);
+        return false;
+    }
+    if (hs != HIDDEN_SIZE || tf != TOTAL_FEATURES) {
+        std::fprintf(stderr,
+            "nnue: '%s' architecture mismatch (file: hidden=%u feats=%u; "
+            "engine: hidden=%d feats=%d)\n",
+            path.c_str(), hs, tf, HIDDEN_SIZE, TOTAL_FEATURES);
+        return false;
+    }
+    // Weights. Reading directly into the arrays leverages the struct's
+    // contiguous layout — std::array of trivially-copyable T is
+    // guaranteed to be contiguous in memory.
+    auto net = std::make_unique<Network>();
+    f.read(reinterpret_cast<char*>(net->feature_biases.data()),
+           sizeof(net->feature_biases));
+    f.read(reinterpret_cast<char*>(net->feature_weights.data()),
+           sizeof(net->feature_weights));
+    f.read(reinterpret_cast<char*>(net->output_weights.data()),
+           sizeof(net->output_weights));
+    f.read(reinterpret_cast<char*>(&net->output_bias),
+           sizeof(net->output_bias));
+    if (!f) {
+        std::fprintf(stderr,
+            "nnue: '%s' truncated — expected ~%zu bytes past header\n",
+            path.c_str(),
+            sizeof(net->feature_biases) + sizeof(net->feature_weights)
+              + sizeof(net->output_weights) + sizeof(net->output_bias));
+        return false;
+    }
+    // Extra trailing bytes are a mismatch — the format is fixed-size,
+    // any tail is either a different architecture or corruption.
+    f.peek();
+    if (!f.eof()) {
+        std::fprintf(stderr,
+            "nnue: '%s' has trailing bytes past network end — refusing\n",
+            path.c_str());
+        return false;
+    }
+
+    g_network = std::move(net);
     g_loaded = true;
-    std::fprintf(stderr,
-        "nnue: loaded '%s' as ZEROED scaffolding network. Every "
-        "position evaluates to 0 cp. Wire up real weight parsing "
-        "before shipping.\n", path.c_str());
+    std::fprintf(stderr, "nnue: loaded '%s' (%d hidden units, %d features)\n",
+                 path.c_str(), HIDDEN_SIZE, TOTAL_FEATURES);
+    return true;
+}
+
+bool save_network(const std::string& path) {
+    if (!g_loaded) {
+        std::fprintf(stderr,
+            "nnue: save_network called with no network loaded\n");
+        return false;
+    }
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        std::fprintf(stderr, "nnue: cannot open '%s' for write\n",
+                     path.c_str());
+        return false;
+    }
+    constexpr uint32_t hs = HIDDEN_SIZE;
+    constexpr uint32_t tf = TOTAL_FEATURES;
+    f.write(FILE_MAGIC, sizeof(FILE_MAGIC));
+    f.write(reinterpret_cast<const char*>(&FORMAT_VERSION),
+            sizeof(FORMAT_VERSION));
+    f.write(reinterpret_cast<const char*>(&hs), sizeof(hs));
+    f.write(reinterpret_cast<const char*>(&tf), sizeof(tf));
+    f.write(reinterpret_cast<const char*>(g_network->feature_biases.data()),
+            sizeof(g_network->feature_biases));
+    f.write(reinterpret_cast<const char*>(g_network->feature_weights.data()),
+            sizeof(g_network->feature_weights));
+    f.write(reinterpret_cast<const char*>(g_network->output_weights.data()),
+            sizeof(g_network->output_weights));
+    f.write(reinterpret_cast<const char*>(&g_network->output_bias),
+            sizeof(g_network->output_bias));
+    if (!f) {
+        std::fprintf(stderr, "nnue: write to '%s' failed\n", path.c_str());
+        return false;
+    }
     return true;
 }
 
