@@ -24,6 +24,31 @@ int evaluate(const Position& pos,
 // before any evaluate() call.
 namespace eval { void init(); }
 
+// Tunable weights exposed for coordinate-descent tuning. All non-PSQ
+// terms (values that don't feed into the incremental psq_mg / psq_eg
+// accumulators — those would need Position recomputation on change).
+// Kept as a struct with default values matching the previous constexpr
+// literals so eval semantics are unchanged out-of-the-box; the tuner
+// mutates them at runtime.
+namespace eval {
+struct TuningParams {
+    int isolated_mg                 = -15;
+    int isolated_eg                 = -20;
+    int doubled_mg                  = -10;
+    int doubled_eg                  = -20;
+    int bishop_pair_mg              =  30;
+    int bishop_pair_eg              =  50;
+    int mob_knight                  =   4;
+    int mob_bishop                  =   3;
+    int mob_rook                    =   2;
+    int mob_queen                   =   1;
+    int shield_missing_penalty      =  12;
+    int king_open_file_penalty      =  30;
+    int king_semi_open_file_penalty =  15;
+};
+extern TuningParams params;
+}  // namespace eval
+
 // Piece-square + material tables exposed so Position can maintain
 // psq_mg / psq_eg incrementally. Not intended for other consumers.
 namespace eval {

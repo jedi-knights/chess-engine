@@ -2,6 +2,7 @@
 #include "eval.h"
 #include "magic.h"
 #include "perft.h"
+#include "tune.h"
 #include "uci.h"
 #include "zobrist.h"
 #include <cerrno>
@@ -30,6 +31,19 @@ int main(int argc, char** argv) {
         }
         std::printf("Running perft suite up to depth %d\n", depth);
         return run_perft_suite(depth, std::cout) ? 0 : 1;
+    }
+
+    if (argc >= 2 && std::strcmp(argv[1], "tune") == 0) {
+        if (argc < 3) {
+            std::fprintf(stderr,
+                "tune: missing dataset path\n"
+                "usage: %s tune <dataset.txt>\n"
+                "  dataset format: one line per position, `<FEN>;<outcome>`\n"
+                "  outcome in {0, 0.5, 1} from WHITE's perspective\n",
+                argv[0]);
+            return 1;
+        }
+        return tune::run_tune(argv[2]);
     }
 
     uci_loop(std::cin, std::cout);

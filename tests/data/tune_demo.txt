@@ -1,0 +1,47 @@
+# Texel-tuning demo dataset — 30 curated positions with known outcomes.
+# Format: <FEN>;<outcome>  where outcome is 0, 0.5, or 1 from WHITE.
+# This tiny set proves the tuner pipeline end-to-end; real tuning wants
+# a labeled corpus of 100k+ quiet positions (e.g. Zurichess quiet-labeled,
+# Ethereal noob-quiet, or your own self-play book).
+
+# --- White clearly winning (up major material, or forced win) ---
+r3k3/8/8/8/8/8/8/4KQR1 w - - 0 1;1.0
+4k3/8/8/8/8/8/8/2KR1R2 w - - 0 1;1.0
+4k3/8/8/8/8/8/PPP5/2KQ4 w - - 0 1;1.0
+2k5/8/8/8/8/8/PPP5/2K5 w - - 0 1;1.0
+4k3/8/8/8/8/8/2P5/3QK3 w - - 0 1;1.0
+4k3/8/8/8/2Q5/8/2R5/4K3 w - - 0 1;1.0
+5k2/8/8/8/8/2N5/PP2K3/8 w - - 0 1;1.0
+4k3/pp6/8/8/8/8/PPPPP3/RNBQK3 w Q - 0 1;1.0
+
+# --- Black clearly winning (up major material) ---
+2kr4/8/8/8/8/8/8/4K3 b - - 0 1;0.0
+3qk3/8/8/8/8/8/8/4K3 b - - 0 1;0.0
+r3k3/pp6/8/8/8/8/8/4K3 b - - 0 1;0.0
+r3k3/8/8/8/8/8/8/4KR2 b - - 0 1;0.0
+2krr3/8/8/8/8/8/8/4K3 b - - 0 1;0.0
+r1bqk3/pppppppp/8/8/8/8/8/4K3 b - - 0 1;0.0
+1n2k3/pppppppp/8/8/8/8/8/4K3 b - - 0 1;0.0
+
+# --- Drawn / roughly balanced ---
+4k3/8/8/8/8/8/8/4K3 w - - 0 1;0.5
+4k3/8/8/8/8/8/8/4KB2 w - - 0 1;0.5
+4k3/8/8/8/8/8/8/4KN2 w - - 0 1;0.5
+4k3/8/8/8/8/8/4p3/4K3 w - - 0 1;0.5
+8/8/8/4k3/8/8/8/4K3 w - - 0 1;0.5
+r1bqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1;0.5
+rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1;0.5
+r1bqk2r/pppppppp/8/8/8/8/PPPPPPPP/R1BQK2R w KQkq - 0 1;0.5
+
+# --- Slight edge to white (small material or positional advantage) ---
+r1bqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1;0.6
+r1bqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1;0.55
+
+# --- Slight edge to black ---
+rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKB1R w KQkq e6 0 2;0.45
+rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQK1NR b KQkq - 0 1;0.4
+
+# --- Endgame KP vs K (theoretical win/draw depending on side) ---
+4k3/8/8/8/8/4K3/4P3/8 w - - 0 1;1.0
+8/8/8/8/8/8/4Pk2/4K3 w - - 0 1;0.5
+4k3/4p3/4K3/8/8/8/8/8 b - - 0 1;0.0
