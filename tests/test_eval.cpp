@@ -25,8 +25,8 @@ TEST_CASE("perspective: same board, different side-to-move flips the sign") {
     // Queen on D1: material + PST + mobility (Q sees 17 squares, weight 1)
     // + tapered king PST + king safety (queen attacks D8 in the black
     // king ring: 5 * 1 = 5 units → table[5] = 5 cp MG penalty for black,
-    // blended by phase = 4 to +~1 cp for white in the final score).
-    // Actual pinned value below; update when eval terms shift.
+    // blended by phase). King-on-open-file skips (both kings on the
+    // E-file, which the wing-file gate excludes as central).
     const char* w_to_move = "4k3/8/8/8/8/8/8/3QK3 w - - 0 1";
     const char* b_to_move = "4k3/8/8/8/8/8/8/3QK3 b - - 0 1";
     Position p1, p2;
@@ -47,12 +47,11 @@ TEST_CASE("piece values + PST contribution on a fixed square") {
     // actually returns after mobility + phase blending.
     struct Case { const char* fen; int expected; const char* label; };
     // King-safety pinned totals: only the queen case fires the safety
-    // penalty. The queen on D1 attacks D8 in the black king ring
-    // (D7/D8/E7/F7/F8 around E8): 5*1 = 5 units → table[5] = 5 cp MG,
-    // blended by phase = 4 → +~1 cp for white in the final score. The
-    // rook/bishop/knight/pawn cases have no white queen, so the safety
-    // short-circuit returns 0 for both sides and their totals are
-    // material + PST + mobility only.
+    // penalty (queen attacks D8 in black king ring → +3 MG blended).
+    // The rook/bishop/knight/pawn cases have no white queen, so the
+    // safety short-circuit returns 0. King-on-open-file skips all
+    // cases: kings are on the central E-file which the wing-file gate
+    // excludes.
     const Case cases[] = {
         {"4k3/8/8/8/8/8/8/3QK3 w - - 0 1",  907, "queen  (900 -  5, K-safety +3 MG blended)"},
         {"4k3/8/8/8/8/8/8/3RK3 w - - 0 1",  515, "rook   (500 +  5)"},
@@ -99,18 +98,18 @@ TEST_CASE("middlegame: castled king scores higher than king in the center") {
     // isn't diluted by the EG table's center bonus. The two positions
     // share identical material — the F1 bishop moved to E2 and the G1
     // knight to F3 in both — so the only PST difference is the king's
-    // square. Delta = MG[G1] - MG[E4] = 30 - (-40) = 70 in PST alone.
-    // But the castled king blocks the F1 rook's east ray and the F3
-    // knight's G1 square, costing 2 rook squares (weight 2 = -4) plus
-    // 1 knight square (weight 4 = -4). Base mobility delta = 70 - 8 = 62.
-    // King safety piles on: black's queen/rooks/knights/bishops all
-    // attack the exposed E4 king ring, adding a large penalty for the
-    // exposed side. Pinned delta below reflects the combined effect.
+    // square. King safety fires on both (attackers on ring), and
+    // king-on-open-file fires on the CASTLED king (G-file has no pawns
+    // in this pawnless test position) but not on the exposed E4 king
+    // (central-file gate). That flips 30 cp back toward the exposed
+    // king, so the pinned delta reflects the combined effect and is
+    // smaller than the shield-and-safety-only case. The important
+    // invariant is directional: castled > exposed.
     Position castled, exposed;
     REQUIRE(castled.set_from_fen("rnbqkbnr/8/8/8/8/5N2/4B3/RNBQ1RK1 w - - 0 1"));  // K on G1
     REQUIRE(exposed.set_from_fen("rnbqkbnr/8/8/8/4K3/5N2/4B3/RNBQ1R2 w - - 0 1"));  // K on E4
     CHECK(evaluate(castled) > evaluate(exposed));
-    CHECK((evaluate(castled) - evaluate(exposed)) == 105);
+    CHECK((evaluate(castled) - evaluate(exposed)) == 75);
 }
 
 TEST_CASE("endgame: king in center scores higher than king in corner") {
@@ -172,21 +171,15 @@ TEST_CASE("pawn hash: repeat evaluate calls agree with fresh evaluate on the sam
 
 // --- King safety ---------------------------------------------------------
 
-TEST_CASE("king safety: queenless positions skip the penalty entirely") {
-    // Neither side has a queen — the per-side gate returns 0 for both
-    // king-safety queries regardless of what pieces are attacking the
-    // rings. This test pins that behavior by comparing a position
-    // where a rook DOES attack the black king ring against one where
-    // no attackers are present: the eval delta must equal only the
-    // material+PST+mobility contribution of the rook, with no safety
-    // component.
+TEST_CASE("king safety: queenless positions skip the ring-attack penalty entirely") {
+    // Neither side has a queen — the king-safety ring-attack gate
+    // returns 0 regardless of what pieces are attacking. The king-on-
+    // open-file term also skips (its wing-file gate excludes the
+    // central E-file kings here). Delta reflects only the rook's own
+    // material + PST + mobility.
     Position rook_attacking, no_rook;
     REQUIRE(rook_attacking.set_from_fen("4k3/8/8/8/8/8/8/3RK3 w - - 0 1"));  // R on D1 attacks D8 in ring
     REQUIRE(no_rook       .set_from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1"));
-
-    // Without king safety the delta is just the rook's material + PST
-    // (500 + 5 = 505) plus its mobility contribution. Adding a king-
-    // safety term would push this higher; the gate must keep it fixed.
     CHECK((evaluate(rook_attacking) - evaluate(no_rook)) == 515);
 }
 
@@ -256,6 +249,41 @@ TEST_CASE("pawn shield: king on a central file gets no shield contribution") {
     // 3 pawns × ~100 cp material + PST tweaks + mobility. Should sit
     // well under 380 — a shield contribution would push it past 400.
     CHECK(delta < 380);
+}
+
+// --- King on open / half-open file --------------------------------------
+
+TEST_CASE("king on open file: king with a defending pawn on its file scores better than one without") {
+    // Same material on both sides, both kings castled at G1/G8. In
+    // `defended`, white's G-pawn sits on G2 (king shielded by own
+    // pawn on king's file). In `undefended`, the G-pawn is gone
+    // entirely — G-file is half-open toward white (only black's G7
+    // pawn on the file). Black has a rook, so the open-file gate
+    // fires. Defended > undefended for white.
+    Position defended, undefended;
+    REQUIRE(defended  .set_from_fen("r1bq1rk1/pppppppp/8/8/8/8/PPPPPPPP/R1BQ1RK1 w - - 0 1"));
+    REQUIRE(undefended.set_from_fen("r1bq1rk1/pppppppp/8/8/8/8/PPPPPP1P/R1BQ1RK1 w - - 0 1"));
+    CHECK(evaluate(defended) > evaluate(undefended));
+}
+
+TEST_CASE("king on open file: skips when opponent has no queen") {
+    // Enemy has no queen — the queen-only gate returns 0 regardless
+    // of file structure. Even a fully-open king file with a rook
+    // attacker doesn't fire the penalty, because the rook's file
+    // threat is already captured by mobility and search extends far
+    // enough for a rook-only pressure line without needing the eval
+    // hint.
+    Position no_pawn, with_pawn;
+    // Only pieces: kings + one white rook (no queen anywhere). Both
+    // white kings sit on E-file for the wing-file gate to skip too;
+    // even without that, the queen gate would suffice.
+    REQUIRE(no_pawn  .set_from_fen("4k3/8/8/8/8/8/8/4KR2 w - - 0 1"));  // K + R only
+    REQUIRE(with_pawn.set_from_fen("4k3/8/8/8/8/8/4P3/4KR2 w - - 0 1"));
+    const int delta = evaluate(with_pawn) - evaluate(no_pawn);
+    // 1 pawn = ~100 cp material + PST tweaks. Should sit under 130.
+    // A spurious open-file penalty would push the "no pawn" position
+    // ~30 cp lower, driving delta above 130.
+    CHECK(delta < 130);
 }
 
 // --- Pawn storm ----------------------------------------------------------
