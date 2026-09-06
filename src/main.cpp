@@ -33,6 +33,11 @@ int main(int argc, char** argv) {
         return run_perft_suite(depth, std::cout) ? 0 : 1;
     }
 
+    if (argc >= 2 && std::strcmp(argv[1], "dump-weights") == 0) {
+        tune::dump_weights();
+        return 0;
+    }
+
     if (argc >= 2 && std::strcmp(argv[1], "tune") == 0) {
         if (argc < 3) {
             std::fprintf(stderr,
