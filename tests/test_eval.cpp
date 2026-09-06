@@ -258,6 +258,33 @@ TEST_CASE("pawn shield: king on a central file gets no shield contribution") {
     CHECK(delta < 380);
 }
 
+// --- Pawn storm ----------------------------------------------------------
+
+TEST_CASE("pawn storm: enemy pawn near our castled king scores worse than one far away") {
+    // Two positions with identical material and an intact white kingside
+    // shield (F2, G2, H2, king on G1). The difference is a single black
+    // pawn's rank on the H-file:
+    //   quiet: black H-pawn on H7 (unmoved) — no storm.
+    //   storm: black H-pawn on H3 (rank_of 2 = distance 2 from white king) — imminent.
+    // The storm position should score worse for white.
+    Position quiet, storm;
+    REQUIRE(quiet.set_from_fen("r1bq1rk1/pppppp1p/2n2np1/2b5/2B5/2N2N2/PPPPPPPP/R1BQ1RK1 w - - 0 1"));
+    REQUIRE(storm.set_from_fen("r1bq1rk1/pppppp2/2n2np1/2b5/2B5/2N2N1p/PPPPPPPP/R1BQ1RK1 w - - 0 1"));
+    CHECK(evaluate(quiet) > evaluate(storm));
+}
+
+TEST_CASE("pawn storm: closer enemy pawn is worse than a farther one") {
+    // Same castled positions; only difference is how advanced black's
+    // H-pawn is. Both positions have same material.
+    //   far  : black H-pawn on H5 (distance 4 from white king rank 1).
+    //   close: black H-pawn on H3 (distance 2).
+    // Closer storm pawn = larger penalty for white.
+    Position far_pawn, close_pawn;
+    REQUIRE(far_pawn  .set_from_fen("r1bq1rk1/ppppppp1/2n2np1/2b4p/2B5/2N2N2/PPPPPPPP/R1BQ1RK1 w - - 0 1"));
+    REQUIRE(close_pawn.set_from_fen("r1bq1rk1/ppppppp1/2n2np1/2b5/2B5/2N2N1p/PPPPPPPP/R1BQ1RK1 w - - 0 1"));
+    CHECK(evaluate(far_pawn) > evaluate(close_pawn));
+}
+
 TEST_CASE("PST is mirrored for black") {
     // White knight on E4 and black knight on E5 are geometrically equivalent
     // (each is centralized in their own half). Both should contribute the
