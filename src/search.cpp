@@ -701,9 +701,10 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         //     and full depth to establish the PV.
         //   - Later moves are much less likely to beat alpha. Probe with
         //     a NULL WINDOW (`-alpha-1, -alpha`) — cheapest possible way
-        //     to answer "does this move improve alpha?" On quiet non-
-        //     promotion moves at deep-enough depths we also REDUCE depth
-        //     (LMR) since late quiet moves rarely change the eval much.
+        //     to answer "does this move improve alpha?" On quiet moves,
+        //     and on captures/promotions already flagged losing by SEE,
+        //     at deep-enough depths we also REDUCE depth (LMR) since
+        //     these are unlikely to change the eval.
         //   - If the null-window probe fails high (score > alpha), the
         //     move actually might be good — pay full window + full depth
         //     to get a real score.
@@ -711,8 +712,16 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         if (i == 0) {
             score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, m, ctx);
         } else {
-            const bool can_reduce = depth >= 3 && !is_cap && !is_promo
-                                  && !node_in_check;
+            // Losing tactical (see_score < 0): move_ordering_score parked
+            // it in the 100k+SEE band, well below the winning-cap band
+            // (1M+SEE) but still above quiets. SEE says the exchange
+            // loses material, so the move is unlikely to rescue alpha —
+            // reduce it under the same schedule as quiets rather than
+            // pay a full-depth null-window probe.
+            const bool losing_tactical =
+                (is_cap || is_promo) && scores[i] < 100'000;
+            const bool can_reduce = depth >= 3 && !node_in_check &&
+                                    ((!is_cap && !is_promo) || losing_tactical);
             int reduction = 0;
             if (can_reduce) {
                 const int d_idx  = std::min(depth,   LMR_MAX_DEPTH - 1);
