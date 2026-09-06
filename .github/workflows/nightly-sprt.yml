@@ -1,0 +1,175 @@
+name: Nightly SPRT
+
+# Runs a Sequential Probability Ratio Test between HEAD and the commit
+# tagged `baseline`, fastchess-managed, so eval regressions surface
+# before they compound. Cron fires overnight (07:00 UTC ~= 03:00 EDT
+# / 00:00 PDT / 08:00 CET) so results are ready by morning; also
+# triggerable manually via workflow_dispatch for ad-hoc runs.
+#
+# Bumping the baseline (do this only after you're confident a recent
+# change genuinely added Elo — SPRT accepted H1, e.g. from a prior
+# nightly run):
+#
+#   git tag -f baseline <sha>
+#   git push -f origin baseline
+#
+# If the `baseline` tag doesn't exist, the workflow fails with
+# instructions on how to create it. That's intentional — a nightly
+# SPRT with no reference point is worse than no nightly at all.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 07:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      tc:
+        description: 'Time control (fastchess format, e.g. 5+0.05)'
+        default: '5+0.05'
+        required: false
+      max_games:
+        description: 'Cap games; SPRT usually stops earlier'
+        default: '400'
+        required: false
+      elo1:
+        description: 'H1 Elo bound (H0 is 0)'
+        default: '5'
+        required: false
+
+# One SPRT run at a time — overlapping runs contend for CPU and give
+# noisy SPRT statistics. Cancel prior in-progress runs on manual
+# triggers so `workflow_dispatch` is responsive.
+concurrency:
+  group: nightly-sprt
+  cancel-in-progress: false
+
+jobs:
+  sprt:
+    name: SPRT vs baseline tag
+    runs-on: ubuntu-latest
+    # Hard ceiling. TC 5+0.05 × concurrency 2 × max_games 400 fits
+    # in ~2-3 hours typically; SPRT stops early on decisive changes.
+    timeout-minutes: 240
+
+    steps:
+      # Full history so we can resolve the `baseline` tag.
+      - name: Checkout current
+        uses: actions/checkout@v4
+        with:
+          path: current
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve baseline tag → SHA
+        id: baseline
+        working-directory: current
+        run: |
+          if ! git rev-parse --verify baseline >/dev/null 2>&1; then
+            echo "::error::No 'baseline' tag in the repo. Create one first:"
+            echo "  git tag -f baseline <sha>"
+            echo "  git push -f origin baseline"
+            echo "Recommended <sha>: the tip of main after your most recent SPRT-confirmed improvement."
+            exit 1
+          fi
+          BASELINE_SHA=$(git rev-parse baseline)
+          echo "sha=$BASELINE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Baseline: $BASELINE_SHA"
+
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.baseline.outputs.sha }}
+          path: baseline
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang python3
+
+      # Cache the fastchess binary keyed on the pinned version. Rebuilds
+      # only when the version pin changes. Fastchess is a small single-
+      # binary project (~1 min to build) — pinning to a tag means a
+      # nightly break in fastchess HEAD doesn't take down our SPRT.
+      - name: Cache fastchess
+        id: cache-fastchess
+        uses: actions/cache@v4
+        with:
+          path: ~/fastchess-bin
+          key: fastchess-v1.4.0-ubuntu-latest
+
+      - name: Build fastchess (from source, cached)
+        if: steps.cache-fastchess.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch=v1.4.0 \
+              https://github.com/Disservin/fastchess.git /tmp/fastchess
+          cd /tmp/fastchess
+          make -j"$(nproc)"
+          mkdir -p ~/fastchess-bin
+          cp fastchess ~/fastchess-bin/
+
+      - name: Add fastchess to PATH
+        run: echo "$HOME/fastchess-bin" >> "$GITHUB_PATH"
+
+      - name: Build current engine
+        working-directory: current
+        run: make
+
+      - name: Build baseline engine
+        working-directory: baseline
+        run: make
+
+      - name: Run SPRT
+        id: run
+        working-directory: current
+        run: |
+          TC="${{ github.event.inputs.tc || '5+0.05' }}"
+          MAX_GAMES="${{ github.event.inputs.max_games || '400' }}"
+          ELO1="${{ github.event.inputs.elo1 || '5' }}"
+
+          # Invoke via python3 directly rather than the script's uv
+          # shebang — sprt.py has no external deps, so bypassing uv
+          # keeps the CI toolchain minimal.
+          set -o pipefail
+          python3 scripts/sprt.py \
+              --baseline ../baseline/engine \
+              --tuned engine \
+              --tc "$TC" \
+              --elo0 0 --elo1 "$ELO1" \
+              --alpha 0.05 --beta 0.05 \
+              --concurrency 2 \
+              --max-games "$MAX_GAMES" \
+              --pgn-out ../sprt.pgn 2>&1 \
+              | tee ../sprt.log
+
+      # SPRT verdict lives in fastchess's log lines. Grep for the
+      # explicit hypothesis-accepted messages so a nightly regression
+      # fails the workflow loudly rather than silently passing.
+      - name: Detect verdict
+        run: |
+          LOG=sprt.log
+          if grep -qE 'H0 (has been )?accepted|SPRT: (LLR .+ H0 accepted|accepted for H0)' "$LOG"; then
+            echo "::error::SPRT accepted H0 — regression vs baseline detected."
+            echo "Investigate the diff between HEAD and the baseline tag."
+            exit 1
+          fi
+          if grep -qE 'H1 (has been )?accepted|SPRT: (LLR .+ H1 accepted|accepted for H1)' "$LOG"; then
+            echo "::notice::SPRT accepted H1 — Elo improvement confirmed."
+            echo "You may want to advance the baseline tag to HEAD after review."
+          else
+            echo "::notice::SPRT inconclusive at max-games. No verdict either way."
+          fi
+
+      - name: Upload PGN
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprt-games
+          path: sprt.pgn
+          retention-days: 30
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprt-log
+          path: sprt.log
+          retention-days: 30
