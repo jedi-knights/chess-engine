@@ -96,11 +96,25 @@ void set_use_nnue(bool on);
 bool use_nnue();
 
 // Attempt to load a network from disk. Returns true on success.
-// Failure leaves the loaded state unchanged (still classical). Format
-// is Stockfish-compatible HalfKP header + weights blob — full parse
-// is a follow-up; scaffolding accepts a magic-header-only file for
-// smoke testing.
+// Failure leaves the loaded state unchanged (still classical).
+//
+// File format is our own — NOT Stockfish-compatible. SF nets use a
+// different architecture (41024→256×2→32→32→1 in SF12; even bigger
+// in newer SF) and different quantization, so cross-loading would
+// require an architecture conversion pass that doesn't exist. See
+// nnue.cpp for the exact layout; magic bytes are "JNN1" so `file`
+// and `hexdump` show something legible.
+//
+// Real trained weights come from a training pipeline (future PR).
+// Until then, use save_network() to dump the current in-memory
+// (zero-initialized) network for round-trip testing.
 bool load_network(const std::string& path);
+
+// Write the current in-memory network to disk in our binary format.
+// Returns true on success. Intended for training-pipeline consumers
+// and the round-trip test; also useful for reproducing a specific
+// weight state across process boundaries.
+bool save_network(const std::string& path);
 
 // Evaluate a position via NNUE. Assumes is_loaded() && use_nnue().
 // Callers (eval.cpp) must fall back to the classical path otherwise.
