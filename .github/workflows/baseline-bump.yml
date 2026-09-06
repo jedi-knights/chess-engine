@@ -1,0 +1,84 @@
+name: Baseline bump — close stale SPRT regression issues
+
+# Fires when the `baseline` tag is (re)pushed. Closes every open issue
+# tagged `nightly-sprt-regression` with a note pointing at the new
+# baseline SHA — the regression they describe is against a stale
+# reference point and the next nightly SPRT will re-establish whether
+# HEAD still regresses against the new baseline.
+#
+# Runs off the workflow definition on the DEFAULT branch, not off the
+# tag content, so bumping baseline to a commit that predates this
+# workflow still triggers correctly.
+#
+# Idempotent: re-pushing the same tag SHA finds no open issues on the
+# second run and no-ops.
+
+on:
+  push:
+    tags:
+      - baseline
+
+concurrency:
+  group: baseline-bump-close-stale
+  cancel-in-progress: false
+
+jobs:
+  close-stale:
+    name: Close open regression issues
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Close open nightly-sprt-regression issues
+        env:
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          NEW_BASELINE: ${{ github.sha }}
+          REPO:         ${{ github.repository }}
+          SERVER_URL:   ${{ github.server_url }}
+          RUN_ID:       ${{ github.run_id }}
+          LABEL:        nightly-sprt-regression
+        run: |
+          set -euo pipefail
+
+          # `gh` needs to run inside a repo context for many commands;
+          # the API-only paths we use here (`gh issue list/comment/close`)
+          # work from the runner's default working directory as long as
+          # GH_REPO or --repo is set. Use env for both.
+          export GH_REPO="$REPO"
+
+          # Collect open issue numbers. `--jq '.[].number'` emits one
+          # number per line; empty output means nothing to close.
+          ISSUE_NUMBERS=$(gh issue list \
+              --label "$LABEL" \
+              --state open \
+              --json number \
+              --jq '.[].number' || true)
+
+          if [ -z "$ISSUE_NUMBERS" ]; then
+            echo "No open '$LABEL' issues — nothing to close."
+            exit 0
+          fi
+
+          COMMIT_URL="$SERVER_URL/$REPO/commit/$NEW_BASELINE"
+          RUN_URL="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
+
+          # Per-issue: comment with the new-baseline pointer, then close.
+          # `gh issue close --reason completed` marks the issue done (as
+          # opposed to `not planned`) — the regression got addressed by
+          # advancing the reference point, which is a completion.
+          for N in $ISSUE_NUMBERS; do
+            echo "Closing issue #$N"
+            {
+              printf 'Baseline tag bumped to [`%s`](%s).\n\n' \
+                  "${NEW_BASELINE:0:7}" "$COMMIT_URL"
+              printf 'This regression was reported against a stale reference '
+              printf 'point and no longer applies. The next nightly SPRT '
+              printf 'will re-establish whether HEAD regresses against the '
+              printf 'new baseline; if so, a fresh issue will open.\n\n'
+              printf 'Auto-closed by [baseline-bump workflow](%s).\n' \
+                  "$RUN_URL"
+            } > /tmp/comment.md
+            gh issue comment "$N" --body-file /tmp/comment.md
+            gh issue close   "$N" --reason completed
+          done
