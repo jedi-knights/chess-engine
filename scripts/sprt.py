@@ -11,10 +11,11 @@ to accept either "the change adds Elo" (H1) or "the change is neutral
 before committing tuned eval weights to the shipped engine.
 
 Prerequisites: cutechess-cli or fastchess installed and on PATH.
-  macOS:  brew install cutechess
-  Linux:  apt install cutechess-cli
-  source: https://github.com/cutechess/cutechess
-          https://github.com/Disservin/fastchess
+  Debian/Ubuntu: sudo apt install cutechess-cli
+  Release binaries: https://github.com/cutechess/cutechess/releases
+                    https://github.com/Disservin/fastchess/releases
+  From source: cutechess needs Qt 6.8+ / cmake; fastchess is a
+               single-Makefile build (much simpler).
 
 Typical workflow:
 
@@ -71,10 +72,11 @@ def check_prereqs(baseline: Path, tuned: Path, book: Path) -> str | None:
     if gm is None:
         print(
             "ERROR: neither cutechess-cli nor fastchess found on PATH.\n"
-            "  Install: brew install cutechess         (macOS)\n"
-            "           apt install cutechess-cli      (Debian/Ubuntu)\n"
-            "           https://github.com/cutechess/cutechess/releases\n"
-            "           https://github.com/Disservin/fastchess/releases",
+            "  Debian/Ubuntu:    sudo apt install cutechess-cli\n"
+            "  Release binaries: https://github.com/cutechess/cutechess/releases\n"
+            "                    https://github.com/Disservin/fastchess/releases\n"
+            "  From source:      cutechess needs Qt 6.8+ / cmake;\n"
+            "                    fastchess is a single-Makefile build.",
             file=sys.stderr,
         )
         return None

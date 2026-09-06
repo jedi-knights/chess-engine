@@ -15,6 +15,7 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
   <a href="#usage">Usage</a> ·
   <a href="#examples">Examples</a> ·
   <a href="#development">Development</a> ·
+  <a href="#evaluation">Evaluation</a> ·
   <a href="#contributing">Contributing</a>
 </p>
 
@@ -187,6 +188,92 @@ third_party/
 Perft (**Per**formance **T**est) counts leaf nodes in the move tree at exactly `depth` plies from a starting position. Any off-by-one in move generation — a missing en-passant capture, an incorrectly-updated castling right, a promotion emitting the wrong piece — will make perft diverge from the standard values.
 
 The standard values used here come from the [Chess Programming Wiki perft results page](https://www.chessprogramming.org/Perft_Results). See `src/perft.cpp` for the six-position suite.
+
+## Evaluation
+
+The engine's strength is measured by playing it against another engine (usually a saved snapshot of itself before a proposed change) and reading off the Elo delta. This is what confirms that a "tuner said MSE went down" or "search change looked good on Kiwipete" translates into actual wins over the board. Two tools cover it:
+
+- **[Cute Chess](https://cutechess.com/)** — the standard toolkit for automating chess-engine matches. Cross-platform, C++/Qt, actively developed since 2008. Ships a GUI (`cutechess`) plus a headless tournament runner (`cutechess-cli`). We use `cutechess-cli`.
+- **[fastchess](https://github.com/Disservin/fastchess)** — a drop-in `cutechess-cli` replacement with a single-Makefile build (no Qt). Faster at running large tournaments. `scripts/sprt.py` picks it up automatically if it's on `PATH`.
+
+### Installing Cute Chess
+
+Cute Chess is not in Homebrew. Options:
+
+- **Debian / Ubuntu**: `sudo apt install cutechess-cli` — packaged, older but functional.
+- **Release binaries**: [github.com/cutechess/cutechess/releases](https://github.com/cutechess/cutechess/releases) (macOS `.dmg`, Windows `.exe`, Linux `.tar.gz`).
+- **From source** (macOS, Linux, Windows): requires Qt 6.8+, cmake, and a C++17 compiler:
+  ```bash
+  git clone https://github.com/cutechess/cutechess.git
+  cd cutechess
+  cmake -S . -B build
+  cmake --build build
+  # cutechess-cli binary at: build/cutechess-cli
+  ```
+
+If the Qt dependency is painful, install fastchess instead — same command-line surface, no Qt:
+
+```bash
+git clone https://github.com/Disservin/fastchess.git
+cd fastchess
+make -j
+# fastchess binary at: ./fastchess
+```
+
+### Running a match
+
+Play 10 games between two copies of this engine at 40 moves in 60 seconds each side:
+
+```bash
+cutechess-cli \
+    -engine cmd=./engine name=engine1 \
+    -engine cmd=./engine name=engine2 \
+    -each proto=uci tc=40/60 \
+    -rounds 10
+```
+
+The `-each` block applies to every engine — set the UCI protocol (`proto=uci`) and time control once instead of duplicating per `-engine`. Cutechess prints per-game results to stdout; add `-pgnout games.pgn` to save the games as PGN for later analysis.
+
+Time control syntax:
+
+| Form | Meaning |
+|---|---|
+| `tc=40/60` | 40 moves in 60 seconds |
+| `tc=10+0.1` | 10 seconds plus 0.1s per-move increment |
+| `tc=inf` | Unlimited (engine controls its own thinking time) |
+| `st=1` | 1 second per move, no increment |
+
+### SPRT — the eval regression gate
+
+For validating any proposed change (tuned eval weights, refactored search, new pruning technique), what matters is whether the change adds Elo — not that it just plays differently. Running 10 games is noise; you need hundreds or thousands. Sequential Probability Ratio Test (Wald 1945) stops as soon as enough evidence accumulates to accept either **H0** ("no gain") or **H1** ("meaningful gain"), so a decisive change resolves in a few hundred games while a marginal one runs to the cap:
+
+```bash
+# 1. Snapshot baseline before applying the change
+make && cp engine engine.baseline
+
+# 2. Apply the change and rebuild
+#    ...edit src/eval.cpp / src/search.cpp ...
+make
+
+# 3. Run SPRT — usually stops in 200-2000 games depending on effect size
+scripts/sprt.py --baseline engine.baseline --tuned engine \
+                --tc 10+0.1 --elo0 0 --elo1 5
+```
+
+`scripts/sprt.py` is a thin wrapper around `cutechess-cli` / `fastchess` that adds preflight validation (both binaries exist, opening book exists, game manager on `PATH`), a checked-in demo opening book (`tests/data/openings_demo.pgn`), and streams results as they arrive. See `scripts/sprt.py --help` for the full option surface (concurrency, max-games, PGN output).
+
+Cutechess handles the SPRT statistic natively (log-likelihood ratio test); the harness just wraps the invocation and reports the verdict.
+
+### Nightly CI SPRT
+
+CI runs SPRT overnight (07:00 UTC) between `HEAD` and the commit currently tagged `baseline` — see `.github/workflows/nightly-sprt.yml`. When SPRT accepts H0 (regression), the workflow auto-opens a labeled GitHub issue with SHAs, config, and a log excerpt so the regression surfaces without a human noticing red X's. Once you're confident a change genuinely added Elo (SPRT-confirmed H1), advance the baseline tag:
+
+```bash
+git tag -f baseline <sha>
+git push -f origin baseline
+```
+
+The tag-push triggers `.github/workflows/baseline-bump.yml`, which auto-closes any stale open regression issues.
 
 ## Contributing
 
