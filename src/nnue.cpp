@@ -1,5 +1,6 @@
 #include "nnue.h"
 #include "bitboard.h"
+#include "nnue_simd.h"
 #include "position.h"
 
 #include <cassert>
@@ -74,10 +75,8 @@ void refresh_side(const ::Position& pos, Accumulator& acc, Color persp) {
                 const Square s = pop_lsb(b);
                 const int idx = feature_index(
                     persp, king_sq, s, PieceType(pt), Color(pc));
-                const auto& col = g_network->feature_weights[idx];
-                for (int i = 0; i < HIDDEN_SIZE; ++i) {
-                    acc.values[persp][i] += col[i];
-                }
+                simd::add_column(acc.values[persp].data(),
+                                 g_network->feature_weights[idx].data());
             }
         }
     }
@@ -122,10 +121,8 @@ void add_piece_to_accumulator(const ::Position& pos, Accumulator& acc,
         if (kbb == 0U) { continue; }
         const Square king_sq = lsb(kbb);
         const int    idx     = feature_index(persp, king_sq, sq, pt, piece_color);
-        const auto&  col     = g_network->feature_weights[idx];
-        for (int i = 0; i < HIDDEN_SIZE; ++i) {
-            acc.values[c][i] += col[i];
-        }
+        simd::add_column(acc.values[c].data(),
+                         g_network->feature_weights[idx].data());
     }
 }
 
@@ -138,10 +135,8 @@ void sub_piece_from_accumulator(const ::Position& pos, Accumulator& acc,
         if (kbb == 0U) { continue; }
         const Square king_sq = lsb(kbb);
         const int    idx     = feature_index(persp, king_sq, sq, pt, piece_color);
-        const auto&  col     = g_network->feature_weights[idx];
-        for (int i = 0; i < HIDDEN_SIZE; ++i) {
-            acc.values[c][i] -= col[i];
-        }
+        simd::sub_column(acc.values[c].data(),
+                         g_network->feature_weights[idx].data());
     }
 }
 
@@ -293,24 +288,20 @@ int evaluate(const ::Position& pos) {
     // caller's perspective (logically-const cache refresh).
     refresh_accumulator(pos);
 
-    // Clipped ReLU (Stockfish-compat activation): clamp to [0, 127].
-    // Then dot with the output weight vector. Concatenation order is
+    // Clipped ReLU (clamp to [0, 127]) + int16 dot product per side,
+    // dispatched to the SIMD kernel. Concatenation order is
     // [side_to_move, opponent] so the network sees "me first."
+    // int64 sum guards against theoretical overflow when a real
+    // trained network fills 512 hidden units — max |product| =
+    // 127 * 32767 = 4.16M, worst-case sum ≈ 2.13B, which is inside
+    // int32 but uncomfortably close.
     const int stm = pos.side_to_move;
     const int opp = stm ^ 1;
     int64_t sum = int64_t(g_network->output_bias);
-    for (int i = 0; i < HIDDEN_SIZE; ++i) {
-        int32_t v = pos.acc.values[stm][i];
-        if (v < 0)   { v = 0; }
-        if (v > 127) { v = 127; }
-        sum += int64_t(g_network->output_weights[i]) * v;
-    }
-    for (int i = 0; i < HIDDEN_SIZE; ++i) {
-        int32_t v = pos.acc.values[opp][i];
-        if (v < 0)   { v = 0; }
-        if (v > 127) { v = 127; }
-        sum += int64_t(g_network->output_weights[HIDDEN_SIZE + i]) * v;
-    }
+    sum += simd::forward_side(pos.acc.values[stm].data(),
+                              g_network->output_weights.data());
+    sum += simd::forward_side(pos.acc.values[opp].data(),
+                              g_network->output_weights.data() + HIDDEN_SIZE);
     // Standard NNUE output scale: divide by 16 * 512 = 8192 to bring
     // integer accumulator back to centipawn range. Zeroed network
     // means sum = bias = 0, so scale factor is a placeholder.

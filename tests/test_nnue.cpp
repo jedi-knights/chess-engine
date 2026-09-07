@@ -6,6 +6,7 @@
 #include "doctest.h"
 
 #include "nnue.h"
+#include "nnue_simd.h"
 #include "position.h"
 
 #include <array>
@@ -384,4 +385,89 @@ TEST_CASE("NNUE incremental accumulator matches full recompute") {
             m,
             "Q3k3/8/8/8/8/8/8/4K3 b - - 0 1");
     }
+}
+
+namespace {
+
+// Deterministic PRNG for SIMD kernel inputs. Simple 32-bit LCG — no
+// need for statistical quality, we just want reproducible pseudo-
+// random int16/int32 values that exercise the negative, zero,
+// mid-range, near-clip, and above-clip cases in the clipped-ReLU
+// path so a lane-permute bug can't hide behind lucky zeros.
+struct Lcg {
+    uint32_t s;
+    explicit Lcg(uint32_t seed) : s(seed) {}
+    uint32_t next() { s = s * 1664525U + 1013904223U; return s; }
+    int32_t  next_i32() { return int32_t(next()); }
+    int16_t  next_i16() { return int16_t(next() & 0xFFFF); }
+};
+
+}  // namespace
+
+TEST_CASE("NNUE SIMD add_column matches reference") {
+    // Repeat across many seeds — a lane-shuffle bug would only show
+    // in specific bit patterns.
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        Lcg rng(seed * 0x9E3779B9U);
+        std::array<int32_t, nnue::HIDDEN_SIZE> acc_a{}, acc_b{};
+        std::array<int16_t, nnue::HIDDEN_SIZE> col{};
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            acc_a[i] = acc_b[i] = rng.next_i32();
+            col[i]   = rng.next_i16();
+        }
+        nnue::simd::add_column(acc_a.data(), col.data());
+        nnue::simd::reference::add_column(acc_b.data(), col.data());
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            CHECK(acc_a[i] == acc_b[i]);
+        }
+    }
+}
+
+TEST_CASE("NNUE SIMD sub_column matches reference") {
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        Lcg rng(seed * 0x7F4A7C15U);
+        std::array<int32_t, nnue::HIDDEN_SIZE> acc_a{}, acc_b{};
+        std::array<int16_t, nnue::HIDDEN_SIZE> col{};
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            acc_a[i] = acc_b[i] = rng.next_i32();
+            col[i]   = rng.next_i16();
+        }
+        nnue::simd::sub_column(acc_a.data(), col.data());
+        nnue::simd::reference::sub_column(acc_b.data(), col.data());
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            CHECK(acc_a[i] == acc_b[i]);
+        }
+    }
+}
+
+TEST_CASE("NNUE SIMD forward_side matches reference") {
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        Lcg rng(seed * 0xD1B54A32U);
+        std::array<int32_t, nnue::HIDDEN_SIZE> acc{};
+        std::array<int16_t, nnue::HIDDEN_SIZE> w{};
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            // Bias toward the clipped-ReLU boundary so lanes hit
+            // <0, 0..127, and >127 with roughly equal frequency.
+            int32_t r = rng.next_i32();
+            acc[i] = (r % 400) - 100;  // range ~[-100, 300)
+            w[i]   = rng.next_i16();
+        }
+        const int32_t simd_out = nnue::simd::forward_side(acc.data(), w.data());
+        const int32_t ref_out  = nnue::simd::reference::forward_side(acc.data(), w.data());
+        CHECK(simd_out == ref_out);
+    }
+}
+
+TEST_CASE("NNUE SIMD forward_side handles clipping boundary exactly") {
+    // Every clip-relevant value: below (-1), at zero, mid (63), at
+    // upper clip (127), above upper clip (128, 32767).
+    std::array<int32_t, nnue::HIDDEN_SIZE> acc{};
+    std::array<int16_t, nnue::HIDDEN_SIZE> w{};
+    const int32_t boundary[] = {-32768, -1, 0, 1, 63, 126, 127, 128, 200, 32767};
+    for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+        acc[i] = boundary[i % (sizeof(boundary) / sizeof(boundary[0]))];
+        w[i]   = int16_t((i * 13) - 100);  // negative, zero, positive weights
+    }
+    CHECK(nnue::simd::forward_side(acc.data(), w.data()) ==
+          nnue::simd::reference::forward_side(acc.data(), w.data()));
 }
