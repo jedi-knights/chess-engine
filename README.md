@@ -6,7 +6,7 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
 [![Badge](https://github.com/jedi-knights/chess-engine/actions/workflows/badge.yaml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/badge.yaml)
 [![Nightly SPRT](https://github.com/jedi-knights/chess-engine/actions/workflows/nightly-sprt.yml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/nightly-sprt.yml)
 [![Baseline bump](https://github.com/jedi-knights/chess-engine/actions/workflows/baseline-bump.yml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/baseline-bump.yml)
-[![Coverage](https://img.shields.io/badge/Coverage-94.3%25-brightgreen)](https://jedi-knights.github.io/chess-engine/?v=52)
+[![Coverage](https://img.shields.io/badge/Coverage-94.3%25-brightgreen)](https://jedi-knights.github.io/chess-engine/?v=53)
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 ![Status](https://img.shields.io/badge/status-early--development-orange.svg)
