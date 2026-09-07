@@ -27,19 +27,30 @@ Typical workflow:
   make
 
   # 3. Run SPRT until conclusive:
-  scripts/sprt.py --baseline engine.baseline --tuned engine \
+  scripts/sprt.py --baseline engine.baseline --tuned engine \\
                   --tc 10+0.1 --elo0 0 --elo1 5
 
   # SPRT stops early — a positive result on a genuine +5 Elo change
   # typically converges in 1000-3000 games; a null result may take
   # 5000-10000. Time-control × games determines wall time.
 
+Per-engine UCI options (--baseline-option / --tuned-option, repeatable)
+support A/B'ing UCI-toggled features like NNUE against the classical
+eval from the same binary:
+
+  scripts/sprt.py --baseline ./engine --tuned ./engine \\
+                  --tuned-option UseNNUE=true \\
+                  --tuned-option EvalFile=/path/to/net.jnn1 \\
+                  --tc 10+0.1 --elo0 -5 --elo1 5
+
 Cutechess handles the SPRT statistic natively (Wald-based, LLR test).
-This script's role is preflight (binaries exist, book exists), building
-the correct command line, and passing results back through exit codes.
+This script's role is preflight (binaries exist, book exists, FD limit
+high enough), building the correct command line, and passing results
+back through exit codes.
 """
 
 import argparse
+import resource
 import shutil
 import subprocess
 import sys
@@ -57,6 +68,16 @@ DEFAULT_BETA = 0.05
 DEFAULT_CONCURRENCY = 1
 DEFAULT_MAX_GAMES = 5000
 
+# fastchess opens ~14 file descriptors per concurrent game pair (stdin,
+# stdout, stderr for each of the two engines, plus PGN, log, and pipe
+# bookkeeping). The base process itself needs headroom for stdout,
+# stderr, opening book, PGN output file, and internal logging.
+# Empirically at concurrency=4 fastchess reports needing 62 FDs; the
+# formula below covers that with a safety margin so nothing surprises
+# a run at high concurrency.
+FD_BASE = 32
+FD_PER_CONCURRENT_GAME = 16
+
 
 def find_gamemanager() -> str | None:
     """Prefer fastchess (faster, drop-in replacement); fall back to cutechess-cli."""
@@ -65,6 +86,62 @@ def find_gamemanager() -> str | None:
         if found:
             return found
     return None
+
+
+def required_fds(concurrency: int) -> int:
+    """File descriptors fastchess needs for the given concurrency.
+
+    Formula: FD_BASE (process-wide overhead) + FD_PER_CONCURRENT_GAME per
+    parallel game pair. Pins against the observed fastchess need of 62
+    at concurrency=4 with headroom, so bumping concurrency doesn't hit
+    the default macOS soft limit (256) mid-run.
+    """
+    return FD_BASE + FD_PER_CONCURRENT_GAME * max(1, concurrency)
+
+
+FD_TARGET_MIN = 65536
+
+
+def ensure_fd_limit(needed: int) -> str | None:
+    """Set RLIMIT_NOFILE soft limit to a finite value >= `needed`.
+
+    macOS quirk: `ulimit -n unlimited` (the default in many shells) exposes
+    RLIM_INFINITY to processes, and fastchess's own FD preflight fails
+    against that value even though the kernel would allow the operation.
+    Always set a specific finite cap (min FD_TARGET_MIN, or `needed` if
+    higher) so fastchess sees a concrete number it can compare against.
+
+    Returns None on success, or an error string on failure so the caller
+    can print + exit.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = max(needed, FD_TARGET_MIN)
+    if hard != resource.RLIM_INFINITY:
+        target = min(target, hard)
+    # Skip only if soft is already a specific value at or above target.
+    if soft != resource.RLIM_INFINITY and soft >= target:
+        return None
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError) as e:
+        return (
+            f"cannot set RLIMIT_NOFILE to {target} "
+            f"(soft={soft}, hard={hard}): {e}. "
+            f"Run with lower --concurrency, or `ulimit -n {target}` manually."
+        )
+    if target < needed:
+        return (
+            f"RLIMIT_NOFILE hard limit is {hard}; need {needed} for "
+            f"concurrency={concurrency_from_needed(needed)}. "
+            f"Lower --concurrency or raise the hard limit via "
+            f"/etc/security/limits.conf (Linux) or launchctl (macOS)."
+        )
+    return None
+
+
+def concurrency_from_needed(needed: int) -> int:
+    """Inverse of `required_fds` — used in error messages only."""
+    return max(1, (needed - FD_BASE) // FD_PER_CONCURRENT_GAME)
 
 
 def check_prereqs(baseline: Path, tuned: Path, book: Path) -> str | None:
@@ -94,6 +171,20 @@ def check_prereqs(baseline: Path, tuned: Path, book: Path) -> str | None:
     return gm
 
 
+def _engine_block(binary: Path, name: str, options: list[str]) -> list[str]:
+    """One `-engine ...` block, with any per-engine `option.KEY=VALUE` tokens.
+
+    fastchess and cutechess-cli both parse `option.KEY=VALUE` tokens inside
+    an engine block as UCI options sent to that engine only. Options must
+    live between this engine's block and the next `-engine` / `-each`
+    boundary — hence the block is built as a contiguous list.
+    """
+    block = ["-engine", f"cmd={binary}", f"name={name}", "proto=uci"]
+    for opt in options:
+        block.append(f"option.{opt}")
+    return block
+
+
 def build_cmd(gm: str, args: argparse.Namespace) -> list[str]:
     # Cutechess/fastchess flags — shared surface between the two.
     # Book format inferred from file suffix; PGN is what the demo ships.
@@ -101,16 +192,10 @@ def build_cmd(gm: str, args: argparse.Namespace) -> list[str]:
 
     # `-repeat` plays each opening twice (once with each color) — halves
     # opening-choice bias per pair of games.
-    cmd: list[str] = [
-        gm,
-        "-engine",
-        f"cmd={args.baseline}",
-        "name=baseline",
-        "proto=uci",
-        "-engine",
-        f"cmd={args.tuned}",
-        "name=tuned",
-        "proto=uci",
+    cmd: list[str] = [gm]
+    cmd += _engine_block(args.baseline, "baseline", args.baseline_option or [])
+    cmd += _engine_block(args.tuned, "tuned", args.tuned_option or [])
+    cmd += [
         "-each",
         f"tc={args.tc}",
         "-openings",
@@ -213,10 +298,32 @@ def main() -> int:
         default=None,
         help="Write played games as PGN to this path",
     )
+    ap.add_argument(
+        "--baseline-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="UCI option to send to the baseline engine only "
+        "(repeatable, e.g. --baseline-option Hash=32)",
+    )
+    ap.add_argument(
+        "--tuned-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="UCI option to send to the tuned engine only "
+        "(repeatable, e.g. --tuned-option UseNNUE=true "
+        "--tuned-option EvalFile=/path/to/net.jnn1)",
+    )
     args = ap.parse_args()
 
     gm = check_prereqs(args.baseline, args.tuned, args.book)
     if gm is None:
+        return 1
+
+    fd_err = ensure_fd_limit(required_fds(args.concurrency))
+    if fd_err is not None:
+        print(f"ERROR: {fd_err}", file=sys.stderr)
         return 1
 
     cmd = build_cmd(gm, args)
