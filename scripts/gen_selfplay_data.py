@@ -6,11 +6,23 @@
 # ]
 # ///
 """
-Self-play data generator for Texel/SPSA tuning. Plays N games against
-the engine itself, extracts quiet positions from each game, labels
-them by the eventual game outcome, and writes the result in the
-`FEN;outcome` format `./engine tune` reads. Fallback for when no
-public labeled corpus fits — every engine can generate its own.
+Self-play data generator for Texel/SPSA tuning and NNUE training.
+Plays N games against the engine itself, extracts quiet positions
+from each game, and writes labeled training data.
+
+Two label modes:
+
+  --label wdl    (default) Label each position with the eventual game
+                 outcome from WHITE's perspective. Output format:
+                 `FEN;outcome` where outcome ∈ {1.0, 0.5, 0.0}. Feeds
+                 `./engine tune` for Texel/SPSA weight tuning.
+
+  --label score  Label each position with the engine's classical eval
+                 at --score-depth from the SIDE-TO-MOVE perspective.
+                 Output format: `FEN|centipawns`. Feeds
+                 `training/train.py` for NNUE training. Higher signal
+                 density than WDL (per-position, not per-game) but
+                 costs one engine.analyse per quiet position.
 
 Pipeline per game:
   1. Pick a random opening from --book (PGN or EPD).
@@ -19,13 +31,13 @@ Pipeline per game:
   3. Terminate on checkmate / stalemate / 50-move / repetition /
      insufficient material. Cap at --max-ply plies as a runaway
      guard (long games ruled a draw).
-  4. Label every recorded position with the game's outcome from
-     WHITE's perspective (1.0 white win, 0.5 draw, 0.0 black win).
+  4. Label every recorded position — WDL from the game outcome, or
+     score from a per-position engine.analyse call.
   5. Filter: drop the first --min-ply plies (opening bias) and any
      non-quiet position (side-to-move in check, or the last move
-     was a capture). Quiet filtering matters — Texel loss is
-     computed against a static eval which is noisy on tactical
-     positions.
+     was a capture). Quiet filtering matters — Texel loss compares
+     against a static eval which is noisy on tactical positions;
+     the same holds for NNUE training.
 
 Prerequisites: Python 3.11+, python-chess >= 1.10 (auto-installed
 via uv PEP 723 header). Cutechess NOT required — this script drives
@@ -36,12 +48,14 @@ Typical usage:
   # Build the engine first.
   make
 
-  # Generate ~5000 quiet labeled positions from 50 self-play games
-  # at 100ms per move (~5-10 minutes wall time):
+  # WDL data for Texel tuning (~5000 quiet positions, ~5-10 min):
   scripts/gen_selfplay_data.py --games 50
-
-  # Feed to the tuner:
   ./engine tune tests/data/selfplay.txt all 5000
+
+  # Score data for NNUE training (per-position eval, ~2x slower):
+  scripts/gen_selfplay_data.py --games 50 --label score --score-depth 8 \\
+                               --output tests/data/selfplay_score.txt
+  training/train.py --data tests/data/selfplay_score.txt --out net.jnn1
 
 Diversity note: with a small opening book (like the checked-in
 tests/data/openings_demo.pgn — 16 openings) and a deterministic
@@ -69,12 +83,55 @@ DEFAULT_MOVETIME_MS = 100
 DEFAULT_MIN_PLY = 8  # skip opening plies (bias)
 DEFAULT_MAX_PLY = 200  # runaway guard
 DEFAULT_SEED = 42
+DEFAULT_LABEL = "wdl"
+DEFAULT_SCORE_DEPTH = 8
 
 OUTCOME_MAP = {
     "1-0": 1.0,
     "0-1": 0.0,
     "1/2-1/2": 0.5,
 }
+
+# Sentinel centipawn value for mate positions. Bounded so downstream
+# sigmoid math (WDL loss on sigmoid(cp/400)) stays numerically stable;
+# large enough to be unambiguous vs any plausible material eval.
+MATE_SCORE_CP = 30000
+
+# Threshold above which a raw Cp value is interpreted as an engine
+# mate signal rather than a genuine evaluation. This engine emits
+# `score cp <MATE_SCORE - ply>` instead of the UCI-standard
+# `score mate <plies>` (see src/uci.cpp:250), so python-chess reads
+# mate scores as very large Cp values. Any |cp| ≥ this threshold is
+# clamped to ±MATE_SCORE_CP; the threshold sits well above any
+# plausible non-mate eval and just below the engine's mate range
+# (which starts at MATE_SCORE - 1000 = 99000).
+ENGINE_MATE_CP_THRESHOLD = 30000
+
+
+def format_score_label(pov_score: chess.engine.PovScore) -> str:
+    """Format a python-chess PovScore as a centipawn label string.
+
+    The score is taken from the side-to-move perspective (``.relative``)
+    to match the trainer's expected input format. Mate scores are
+    clamped to ``±MATE_SCORE_CP`` — raw mate distance is not a
+    comparable centipawn value and would break the sigmoid loss.
+
+    Handles both UCI mate representations: proper ``score mate N`` and
+    the engine's current ``score cp (MATE_SCORE - N)`` (see
+    src/uci.cpp:250; if the engine is fixed to emit standard mate
+    scores, the ``is_mate`` branch takes over and the Cp-clamp branch
+    becomes a no-op).
+    """
+    score = pov_score.relative
+    if score.is_mate():
+        mate_dist = score.mate()
+        return str(MATE_SCORE_CP if mate_dist > 0 else -MATE_SCORE_CP)
+    cp = score.score()
+    if cp >= ENGINE_MATE_CP_THRESHOLD:
+        return str(MATE_SCORE_CP)
+    if cp <= -ENGINE_MATE_CP_THRESHOLD:
+        return str(-MATE_SCORE_CP)
+    return str(cp)
 
 
 def load_openings(book_path: Path) -> list[chess.Board]:
@@ -254,6 +311,24 @@ def main() -> int:
         default=DEFAULT_SEED,
         help="RNG seed for opening selection (default: %(default)s)",
     )
+    ap.add_argument(
+        "--label",
+        choices=["wdl", "score"],
+        default=DEFAULT_LABEL,
+        help="Label kind: 'wdl' writes 'FEN;outcome' for Texel tuning "
+        "(game outcome from WHITE's perspective); 'score' writes "
+        "'FEN|centipawns' for NNUE training (classical eval from the "
+        "side-to-move perspective, at --score-depth) "
+        "(default: %(default)s)",
+    )
+    ap.add_argument(
+        "--score-depth",
+        type=int,
+        default=DEFAULT_SCORE_DEPTH,
+        help="Search depth for classical-eval labels when --label=score. "
+        "Higher = better quality per position but linearly slower. "
+        "Ignored when --label=wdl (default: %(default)s)",
+    )
     args = ap.parse_args()
 
     if not args.engine.exists():
@@ -292,6 +367,8 @@ def main() -> int:
     skipped = 0
     outcome_counts = {1.0: 0, 0.5: 0, 0.0: 0}
 
+    score_limit = chess.engine.Limit(depth=args.score_depth)
+
     try:
         with args.output.open("w") as out:
             out.write(
@@ -302,6 +379,13 @@ def main() -> int:
                 f"# Opening book: {args.book} "
                 f"({len(openings)} positions, seed={args.seed})\n"
             )
+            if args.label == "score":
+                out.write(
+                    f"# Label: score (classical eval, depth={args.score_depth}) "
+                    f"— format: FEN|centipawns (STM perspective)\n"
+                )
+            else:
+                out.write("# Label: wdl (game outcome) — format: FEN;outcome\n")
 
             for i in range(args.games):
                 # Reset TT between games so cross-game state doesn't
@@ -328,7 +412,20 @@ def main() -> int:
                     if pos.ply() <= cutoff or not is_quiet(pos):
                         skipped += 1
                         continue
-                    out.write(f"{pos.fen()};{outcome}\n")
+                    if args.label == "score":
+                        try:
+                            info = engine.analyse(pos, score_limit)
+                        except chess.engine.EngineError as e:
+                            print(
+                                f"  engine analyse failed at {pos.fen()}: {e}",
+                                file=sys.stderr,
+                            )
+                            skipped += 1
+                            continue
+                        label = format_score_label(info["score"])
+                        out.write(f"{pos.fen()}|{label}\n")
+                    else:
+                        out.write(f"{pos.fen()};{outcome}\n")
                     written += 1
 
                 if (i + 1) % 10 == 0 or i + 1 == args.games:
@@ -354,9 +451,16 @@ def main() -> int:
         )
         return 1
 
-    print("\nFeed to the tuner with:", file=sys.stderr)
-    print(f"  ./engine tune {args.output} scalar", file=sys.stderr)
-    print(f"  ./engine tune {args.output} pst 10000", file=sys.stderr)
+    if args.label == "score":
+        print("\nFeed to the NNUE trainer with:", file=sys.stderr)
+        print(
+            f"  training/train.py --data {args.output} --out net.jnn1 --epochs 20",
+            file=sys.stderr,
+        )
+    else:
+        print("\nFeed to the tuner with:", file=sys.stderr)
+        print(f"  ./engine tune {args.output} scalar", file=sys.stderr)
+        print(f"  ./engine tune {args.output} pst 10000", file=sys.stderr)
     return 0
 
 
