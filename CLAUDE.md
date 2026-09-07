@@ -55,9 +55,9 @@ src/                engine sources
                     repetition + 50-move draw detection, TT-walked PV
   notation.[h|cpp]  UCI move ↔ Move (move_to_uci, parse_uci_move)
   uci.[h|cpp]       UCI protocol loop on a background std::thread; per-iter
-                    info lines with full PV + nps + time; clock time
-                    management for wtime/btime; info string on mid-search
-                    position command
+                    info lines with full PV + nps + time (score cp / score
+                    mate N per UCI standard); clock time management for
+                    wtime/btime; info string on mid-search position command
   tune.[h|cpp]      Texel coordinate-descent + SPSA tuner over eval
                     weights; reads `<FEN>;<outcome>` datasets, fits
                     sigmoid K, minimizes MSE; auto-prints tuned weights

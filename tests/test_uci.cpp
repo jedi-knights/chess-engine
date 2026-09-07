@@ -4,6 +4,7 @@
 
 #include "doctest.h"
 
+#include "search.h"
 #include "uci.h"
 
 #include <sstream>
@@ -92,6 +93,73 @@ TEST_CASE("go on a mated position emits bestmove 0000") {
         "go depth 1\n"
         "quit\n");
     CHECK(contains(out, "bestmove 0000"));
+}
+
+TEST_CASE("format_uci_score: ordinary cp values pass through") {
+    CHECK(format_uci_score(0)     == "score cp 0");
+    CHECK(format_uci_score(45)    == "score cp 45");
+    CHECK(format_uci_score(-127)  == "score cp -127");
+    CHECK(format_uci_score(2500)  == "score cp 2500");
+    CHECK(format_uci_score(-2500) == "score cp -2500");
+}
+
+TEST_CASE("format_uci_score: positive mate range emits `score mate N` in moves") {
+    // MATE_SCORE - 1 ply → mate in 1 ply → 1 full move (ceil(1/2)).
+    CHECK(format_uci_score(MATE_SCORE - 1) == "score mate 1");
+    // MATE_SCORE - 3 plies → mate in 2 moves (ceil(3/2)).
+    CHECK(format_uci_score(MATE_SCORE - 3) == "score mate 2");
+    // Deeper mates still round up correctly.
+    CHECK(format_uci_score(MATE_SCORE - 9) == "score mate 5");
+}
+
+TEST_CASE("format_uci_score: negative mate range emits `score mate -N` in moves") {
+    // Symmetric sign check: negative-mate branch must convert the same
+    // way as positive. Guards against a sign-flip typo (which the
+    // positive-path tests would not catch).
+    CHECK(format_uci_score(-MATE_SCORE + 1) == "score mate -1");
+    CHECK(format_uci_score(-MATE_SCORE + 3) == "score mate -2");
+    CHECK(format_uci_score(-MATE_SCORE + 9) == "score mate -5");
+}
+
+TEST_CASE("format_uci_score: boundary between mate and cp") {
+    // Anything within MATE_RANGE plies of MATE_SCORE is mate; anything
+    // outside is cp. Regression against off-by-one drift in the
+    // classifier — a tuned eval term that happens to return
+    // MATE_SCORE - MATE_RANGE - 1 must NOT be reported as mate.
+    CHECK(format_uci_score(MATE_SCORE  - MATE_RANGE + 1)   ==
+          "score mate " + std::to_string((MATE_RANGE - 1 + 1) / 2));
+    CHECK(format_uci_score(MATE_SCORE  - MATE_RANGE - 1)   ==
+          "score cp "   + std::to_string(MATE_SCORE - MATE_RANGE - 1));
+    CHECK(format_uci_score(-MATE_SCORE + MATE_RANGE - 1)   ==
+          "score mate -" + std::to_string((MATE_RANGE - 1 + 1) / 2));
+    CHECK(format_uci_score(-MATE_SCORE + MATE_RANGE + 1)   ==
+          "score cp "    + std::to_string(-MATE_SCORE + MATE_RANGE + 1));
+}
+
+TEST_CASE("go emits `score mate` on a forced win, not raw cp (end-to-end wiring)") {
+    // Wiring test: proves format_uci_score is actually called from the
+    // info-line emit path. Position: white king a6, black king a8,
+    // white queen b1. Best move Qb1-b8 mates in 1 ply — no escape
+    // (a7 covered by Ka6, b7 covered by post-move queen).
+    //
+    // Pre-fix behavior: info line reported `score cp 99999`; a real
+    // UCI GUI would render "+9999.99" instead of "mate 1", losing the
+    // mate signal.
+    std::string out = run_session(
+        "position fen k7/8/K7/8/8/8/8/1Q6 w - - 0 1\n"
+        "go depth 3\n"
+        "quit\n");
+    CHECK(contains(out, "score mate "));
+    CHECK_FALSE(contains(out, "score cp 99"));
+    CHECK_FALSE(contains(out, "score cp 100000"));
+}
+
+TEST_CASE("go on ordinary positions still emits `score cp`, not `score mate`") {
+    // Regression: the mate-range check must not fire on middlegame
+    // positions where the eval is well inside cp range.
+    std::string out = run_session("position startpos\ngo depth 3\nquit\n");
+    CHECK(contains(out, "score cp "));
+    CHECK_FALSE(contains(out, "score mate"));
 }
 
 TEST_CASE("go depth 1 reports depth 1 in info line") {

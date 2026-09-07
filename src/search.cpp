@@ -16,7 +16,9 @@
 namespace {
 
 constexpr int INF        = 1'000'000;   // sentinel — never a real eval score
-constexpr int MATE_SCORE = 100'000;     // large but distinguishable from INF
+// MATE_SCORE + MATE_RANGE now live in search.h so UCI (and any other
+// consumer of SearchResult::score) can classify a returned score as
+// "in mate range" without redefining the constants.
 
 // Module-static TT — lives for the process, warm across `go` commands so
 // iterative deepening's later iterations can hit entries from earlier
