@@ -1,4 +1,5 @@
 engine
+engine.baseline
 tests/run
 coverage/
 *.o
@@ -13,3 +14,6 @@ TODO.md
 # Python (training pipeline)
 __pycache__/
 *.pyc
+
+# fastchess workspace config (personal; adjudication rules vary per user)
+config.json
