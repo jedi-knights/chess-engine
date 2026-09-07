@@ -122,15 +122,22 @@ def build_cmd(gm: str, args: argparse.Namespace) -> list[str]:
         f"elo1={args.elo1}",
         f"alpha={args.alpha}",
         f"beta={args.beta}",
-        "-games",
-        str(args.max_games),
+        # fastchess semantics: `-rounds N -repeat` = N rounds × 2
+        # games/round = 2N total games with colors swapped per opening.
+        # Cutechess-cli accepts the same form. Previously used
+        # `-games N` which fastchess interprets as "games per round"
+        # (default 2) — capped total games at 4 regardless of N.
+        "-rounds",
+        str(max(1, args.max_games // 2)),
         "-concurrency",
         str(args.concurrency),
         "-repeat",
     ]
-    # PGN output — useful for debugging pathological positions after a run.
+    # PGN output — useful for debugging pathological positions after a
+    # run. fastchess requires the `file=` key-value form; cutechess-cli
+    # accepts it too (bare `<path>` is a cutechess-only shorthand).
     if args.pgn_out:
-        cmd += ["-pgnout", str(args.pgn_out)]
+        cmd += ["-pgnout", f"file={args.pgn_out}"]
     return cmd
 
 
