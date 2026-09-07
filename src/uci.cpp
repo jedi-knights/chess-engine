@@ -46,6 +46,30 @@ void wait_for_search() {
     g_stop.store(false, std::memory_order_relaxed);
 }
 
+}  // namespace
+
+std::string format_uci_score(int score) {
+    // UCI: `score mate <N>` when the score is in the mate window (search
+    // returns `MATE_SCORE - plies` when we deliver mate, `-MATE_SCORE +
+    // plies` when we get mated). `<N>` is full moves to mate, rounded
+    // up — Stockfish convention. Sign encodes side: positive = we mate,
+    // negative = we get mated. Cutechess / Arena rely on this
+    // distinction; a raw `cp 99999` for a mate is a protocol violation.
+    if (score >= MATE_SCORE - MATE_RANGE) {
+        int plies = MATE_SCORE - score;
+        int moves = (plies + 1) / 2;
+        return "score mate " + std::to_string(moves);
+    }
+    if (score <= -MATE_SCORE + MATE_RANGE) {
+        int plies = MATE_SCORE + score;  // score is negative
+        int moves = (plies + 1) / 2;
+        return "score mate -" + std::to_string(moves);
+    }
+    return "score cp " + std::to_string(score);
+}
+
+namespace {
+
 void cmd_uci(std::ostream& out) {
     emit(out,
          "id name jedi-engine 0.0.1\n"
@@ -247,10 +271,10 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
 
                     std::ostringstream line;
                     line << "info depth " << iter.depth
-                         << " score cp "  << iter.score
-                         << " nodes "     << iter.nodes
-                         << " nps "       << nps
-                         << " time "      << elapsed_ms
+                         << ' ' << format_uci_score(iter.score)
+                         << " nodes " << iter.nodes
+                         << " nps "   << nps
+                         << " time "  << elapsed_ms
                          << " pv";
                     // Full PV walked from the TT. Fall back to just the
                     // bestmove if the walk came up empty (shouldn't

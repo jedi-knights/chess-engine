@@ -7,6 +7,17 @@
 #include <functional>
 #include <vector>
 
+// Mate encoding: a score of `MATE_SCORE - N` means "we deliver mate in
+// N plies from this node"; `-MATE_SCORE + N` means "we get mated in
+// N plies". `MATE_RANGE` bounds the plies-to-mate window so callers can
+// classify a score as "in mate range" without knowing the current ply.
+// Values here are the contract between the search and any code that
+// consumes SearchResult::score (currently UCI, but also mate-aware
+// eval routines that need to know a returned score is not a plausible
+// centipawn value).
+constexpr int MATE_SCORE = 100'000;
+constexpr int MATE_RANGE = 1'000;
+
 struct SearchResult {
     Move     best_move = NULL_MOVE;   // NULL_MOVE only if no legal moves exist
     int      score     = 0;           // centipawns from side_to_move perspective
