@@ -4,6 +4,8 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
 
 [![CI](https://github.com/jedi-knights/chess-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/ci.yml)
 [![Badge](https://github.com/jedi-knights/chess-engine/actions/workflows/badge.yaml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/badge.yaml)
+[![Nightly SPRT](https://github.com/jedi-knights/chess-engine/actions/workflows/nightly-sprt.yml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/nightly-sprt.yml)
+[![Baseline bump](https://github.com/jedi-knights/chess-engine/actions/workflows/baseline-bump.yml/badge.svg)](https://github.com/jedi-knights/chess-engine/actions/workflows/baseline-bump.yml)
 [![Coverage](https://img.shields.io/badge/Coverage-96.4%25-brightgreen)](https://jedi-knights.github.io/chess-engine/?v=44)
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
@@ -14,6 +16,7 @@ A C++20 chess engine built as a validated milestone sequence — small enough to
   <a href="#installation">Install</a> ·
   <a href="#usage">Usage</a> ·
   <a href="#examples">Examples</a> ·
+  <a href="#nnue">NNUE</a> ·
   <a href="#development">Development</a> ·
   <a href="#evaluation">Evaluation</a> ·
   <a href="#contributing">Contributing</a>
@@ -31,8 +34,8 @@ This project builds each layer as a validated milestone. Every commit is a well-
 
 ```bash
 $ make test
-[doctest] test cases:    144 |    144 passed | 0 failed | 0 skipped
-[doctest] assertions: 270026 | 270026 passed | 0 failed |
+[doctest] test cases:    180 |    180 passed | 0 failed | 0 skipped
+[doctest] assertions: 274847 | 274847 passed | 0 failed |
 
 $ ./engine perft 2 | grep "Startpos" -A 2
 === Startpos ===
@@ -52,10 +55,11 @@ Currently implemented (all 8 milestones plus post-roadmap search / eval / UCI wo
 - Perft driver and 6-position standard test suite
 - Evaluation: material + **piece-square tables** (Simplified Evaluation Function) with **tapered eval** (king PST interpolates linearly between middlegame safety and endgame centralization by non-pawn phase), **safe mobility** (per-piece weighted attack squares excluding enemy pawn attacks), **passed pawns** (separate MG/EG rank bonuses via precomputed masks), and a **bishop pair** bonus. Incremental PSQ so the hot path pays no per-piece loop.
 - Search: **iterative-deepening negamax** with alpha-beta + **quiescence** (captures + promotions, in-check evasion, SEE-pruned) + **aspiration windows** (±75 cp, doubling on fail) + **Zobrist-hashed TT** (~1M entries, EXACT/LOWER/UPPER, mate-score ply-adjusted) + **PVS** (root and internal) + **null-window LMR** + **null-move pruning** (R=3, zugzwang-guarded) + **check extensions** + **reverse futility** + **razoring** + **SEE**-scored capture/promotion ordering (winning above killers, losing below) + **killer moves** + **history heuristic** (capped) + **repetition + 50-move** draw detection. Startpos reaches depth 10 in ~27 ms / ~301k nodes with a full 10-ply PV.
-- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`/`infinite`, `stop`, `d`, `quit`) on a background `std::thread`; per-iteration `info` lines emit `depth score cp nodes nps time pv <full line walked from the TT>`; `ucinewgame` clears the TT; `go infinite` runs asynchronously; sending `position` mid-search surfaces an `info string` before canceling.
-- doctest unit test suite (144 cases / 270k assertions) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
+- **NNUE evaluation** — HalfKP → 256 → 1 architecture with a per-`Position` **incremental accumulator** (per-side dirty flags on king moves; non-king pieces update in O(features-per-piece) via `put_piece`/`remove_piece` hooks). **SIMD kernels** for the three hot loops — NEON on AArch64 (Apple Silicon), AVX2 on x86-64, scalar reference always compiled and pinned by SIMD-vs-reference equivalence tests. Custom **JNN1** binary file format (~20 MiB) with header validation. Off by default — enabled per-run via UCI `UseNNUE` + `EvalFile`; a companion **Python training pipeline** (`training/`, uv-scripts) turns self-play data into a loadable network.
+- UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`/`infinite`, `stop`, `d`, `quit`) on a background `std::thread`; per-iteration `info` lines emit `depth score cp nodes nps time pv <full line walked from the TT>`; `ucinewgame` clears the TT; `go infinite` runs asynchronously; sending `position` mid-search surfaces an `info string` before canceling. UCI `option` block exposes `UseNNUE` (check) + `EvalFile` (string) for enabling NNUE and pointing at a `.jnn1` file.
+- doctest unit test suite (180 cases / 274k assertions) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
-Post-roadmap ideas still open (see `CLAUDE.md` non-goals): opening book / endgame tablebases, multi-threading (Lazy SMP), pondering, MultiPV output, NNUE eval.
+Post-roadmap ideas still open (see `CLAUDE.md` non-goals): opening book / endgame tablebases, multi-threading (Lazy SMP), pondering, MultiPV output.
 
 ## Requirements
 
@@ -141,7 +145,66 @@ All six positions match through depth 5 (`make perft`, ~200M nodes). `make perft
 
 ## Configuration
 
-None. No environment variables, no config files. The engine reads UCI on stdin and writes on stdout.
+No environment variables, no config files. The engine reads UCI on stdin and writes on stdout. Two per-run knobs live behind the UCI `option` block:
+
+| Option     | Type     | Default    | Meaning |
+|------------|----------|------------|---------|
+| `UseNNUE`  | `check`  | `false`    | Route `evaluate()` through the NNUE forward pass. Falls back to classical eval when `false` or when no network is loaded. |
+| `EvalFile` | `string` | `<empty>`  | Absolute path to a `.jnn1` file. Loads on assignment; a malformed / mistyped path keeps the previous state (safety net). |
+
+Set them from any UCI GUI, or via stdin:
+
+```bash
+$ ./engine
+setoption name EvalFile value /abs/path/to/net.jnn1
+setoption name UseNNUE value true
+position startpos
+go depth 8
+```
+
+## NNUE
+
+Classical evaluation adds up handcrafted terms — material, piece-square tables, mobility, pawn structure, king safety. Every extra term needs a human to (a) name a chess concept, (b) hand-tune its weight, (c) prove via SPRT it actually adds Elo. Progress is linear in the author's chess knowledge and time.
+
+**NNUE** (Efficiently Updatable Neural Network) skips the handcrafting: a small neural network reads the raw board and outputs a score. The trick is the "efficiently updatable" part — the input to a chess network is 41,024 sparse features per side (HalfKP: one feature per `(king_square, piece_square, piece_type, piece_color)` combination), and recomputing all of them per position would be far slower than any classical eval. Instead the network's first-layer output is kept as a **per-position accumulator**: when a piece moves, only the affected feature-weight columns change, so `O(features per move)` scalar updates in `Position::put_piece` / `remove_piece` keep the accumulator in sync — cheaper than the classical mobility loop it replaces.
+
+This repo's NNUE stack (all shipped, all off by default):
+
+| Layer                        | What it does                                                                                                                                                  |
+|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Runtime** (`src/nnue.*`)   | HalfKP → 256 → 1 forward pass. Per-side accumulator on `Position` with dirty flags for king moves (only the moving side's perspective invalidates).           |
+| **SIMD** (`src/nnue_simd.h`) | NEON kernels for AArch64 (Apple Silicon), AVX2 kernels for x86-64. Scalar reference always compiled; SIMD-vs-reference equivalence is unit-tested.            |
+| **JNN1 format** (`src/nnue.cpp`) | Custom int16 quantized binary — `"JNN1"` magic + `uint32 {version, hidden, features}` header + weights. Header-validated on load; not Stockfish-compatible.   |
+| **Trainer** (`training/`)    | Python `torch` pipeline. Reads `fen;wdl` / `fen\|cp` self-play data → HalfKP encoding → MSE-on-sigmoid loss → int16 export in the runtime's format.           |
+
+### Loading a network at runtime
+
+```bash
+$ ./engine
+setoption name EvalFile value /abs/path/to/net.jnn1
+setoption name UseNNUE value true
+position startpos
+go depth 8
+```
+
+The engine logs `nnue: loaded '<path>' (256 hidden units, 41024 features)` on success and emits `info string EvalFile loaded: <path>`. A missing / mistyped / architecture-mismatched file is rejected and the engine keeps whatever eval mode was active before.
+
+### Training a network
+
+See [`training/README.md`](training/README.md) for the full workflow. Short form:
+
+```bash
+# 1. Produce self-play data (all flags default; --help for the full surface)
+scripts/gen_selfplay_data.py --games 500 --output data/selfplay.txt
+# Or reuse the checked-in tests/data/selfplay_500.txt (49,772 positions).
+
+# 2. Train — uv resolves torch + python-chess on first run and caches
+training/train.py --data data/selfplay.txt --out net.jnn1 --epochs 20
+
+# 3. Point the engine at the .jnn1 (see "Loading a network" above)
+```
+
+Correctness bridge: the Python `feature_index()` is pinned against the C++ `nnue::feature_index()` values in `tests/test_nnue.cpp` — a divergence would silently make trained networks unusable at inference.
 
 ## Development
 
@@ -165,12 +228,22 @@ src/
   magic.[h|cpp]      magic bitboards — init-time search + O(1) slider attacks
   zobrist.[h|cpp]    Zobrist keys + init + full-recompute reference
   position.[h|cpp]   Position, FEN, make_move / unmake_move + UndoInfo;
-                     incremental Zobrist + PSQ; repetition-key stack
+                     incremental Zobrist + PSQ + NNUE accumulator hooks;
+                     repetition-key stack
   movegen.[h|cpp]    generate_moves (fully legal) + in_check; pin-aware +
                      enemy-attack shortcuts skip most make/unmake round-trips
   perft.[h|cpp]      perft driver + 6-position standard suite
   eval.[h|cpp]       material + PST + tapered + mobility + passed pawn +
-                     bishop pair
+                     bishop pair; NNUE-aware entry point routes to
+                     `nnue::evaluate` when UseNNUE + a loaded network
+  nnue_types.h       Accumulator + shape constants (HIDDEN_SIZE, etc.);
+                     kept here so `Position` can hold an Accumulator by
+                     value without cycling nnue.h ↔ position.h
+  nnue.[h|cpp]       NNUE runtime — HalfKP feature index, per-side
+                     incremental accumulator with dirty flags, JNN1
+                     binary loader/saver, forward pass
+  nnue_simd.h        NEON + AVX2 kernels for add_column / sub_column /
+                     forward_side, scalar reference always compiled
   tt.[h|cpp]         transposition table (fixed-size direct-mapped)
   search.[h|cpp]     iterative-deepening negamax + qsearch + TT + SEE + PVS
                      + LMR + null-move + check extensions + RFP + razoring
@@ -179,6 +252,7 @@ src/
   uci.[h|cpp]        UCI protocol loop on a background std::thread
   main.cpp           entry point (dispatches `perft` or falls into UCI)
 tests/               doctest suite; one file per src unit under test
+training/            Python NNUE trainer (uv-scripts) — see training/README.md
 third_party/
   doctest.h          v2.4.11 (pinned single-header)
 ```
