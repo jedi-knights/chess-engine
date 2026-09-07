@@ -24,7 +24,7 @@ src/                engine sources
   bitboard.[h|cpp]  popcount, lsb, pretty
   attacks.[h|cpp]   precomputed leaper attack tables (knight/king/pawn)
   position.[h|cpp]  Position, FEN, make_move/unmake_move + UndoInfo; incremental
-                    Zobrist + pawn-only Zobrist + PSQ accumulators;
+                    Zobrist + pawn-only Zobrist + PSQ + NNUE accumulators;
                     repetition-key stack
   movegen.[h|cpp]   generate_moves (legal moves) with pin-aware + enemy-attack
                     shortcuts + in_check helper
@@ -36,7 +36,18 @@ src/                engine sources
   eval.[h|cpp]      material + PST + tapered eval + mobility + passed /
                     isolated / doubled pawns (cached in a 16k-entry pawn
                     hash by Position::pawn_key) + bishop pair
-                    (side-to-move perspective, incremental PSQ)
+                    (side-to-move perspective, incremental PSQ); routes
+                    to nnue::evaluate when UseNNUE + a loaded network
+  nnue_types.h      Accumulator + shape constants (HIDDEN_SIZE, FEATURES);
+                    split from nnue.h so position.h can declare an
+                    accumulator value without cycling nnue.h ↔ position.h
+  nnue.[h|cpp]      NNUE runtime — HalfKP → 256 → 1 forward pass; per-side
+                    accumulator with king-move dirty flags; JNN1 binary
+                    loader/saver (magic + header validated; not
+                    Stockfish-compatible); off by default
+  nnue_simd.h       NEON kernels (AArch64) + AVX2 kernels (x86-64); scalar
+                    reference always compiled and pinned by
+                    SIMD-vs-reference equivalence tests
   search.[h|cpp]    iterative-deepening negamax with alpha-beta, TT, qsearch,
                     SEE-scored captures/promotions, PVS + null-window LMR,
                     null-move pruning, check extensions, reverse futility +
@@ -47,10 +58,25 @@ src/                engine sources
                     info lines with full PV + nps + time; clock time
                     management for wtime/btime; info string on mid-search
                     position command
-  main.cpp          entry (dispatches `perft` subcommand or falls into UCI)
+  tune.[h|cpp]      Texel coordinate-descent + SPSA tuner over eval
+                    weights; reads `<FEN>;<outcome>` datasets, fits
+                    sigmoid K, minimizes MSE; auto-prints tuned weights
+                    as paste-ready C++ for eval.[h|cpp]
+  main.cpp          entry (dispatches `perft` / `tune` / `dump-weights`
+                    subcommands or falls into UCI)
 tests/              doctest suite; one file per src unit under test
 third_party/
   doctest.h         v2.4.11 (pinned single-header). Update via curl from the release tag.
+scripts/            Python helpers for the tuning workflow
+  fetch_tuning_dataset.py  Pull public labeled corpora (Zurichess quiet-labeled, etc.)
+                           → `<FEN>;<outcome>` lines for `./engine tune`.
+  gen_selfplay_data.py     Generate self-play datasets — fallback when public
+                           corpora don't reflect this engine's play-style.
+  sprt.py                  Drive `fastchess` SPRT matches vs a baseline binary
+                           (`-rounds/-repeat`, `-pgnout file=…`) until H0/H1.
+training/           Python NNUE trainer (uv-scripts) — turns self-play data into
+                    loadable `.jnn1` networks. See training/README.md for details;
+                    `feature_index()` pinned against C++ in tests/test_nnue.cpp.
 ```
 
 ## Movegen milestone roadmap
@@ -100,6 +126,16 @@ Tracked in `src/movegen.h`. Each milestone is committed separately and validated
 - ✅ Link-time optimization (`-flto`). Enables cross-file inlining and dead-code elimination — the linker inlines hot leaf functions (magic-bitboard lookups, `tt().prefetch`, `is_capture`, small position accessors) across translation-unit boundaries that per-file compilation couldn't see. Kiwipete d12: 397 → 367 ms (**-7.5%**, 6-run average). Node counts differ by 1-2 (LTO inlined `should_stop` slightly differently, changing when the 1024-node wall-clock poll fires by one iteration — semantic no-op).
 - ✅ Improving flag + LMR discount. `SearchContext::eval_stack[MAX_PLY]` records static eval at each ply (from the existing RFP `evaluate()` call — no extra cost). At each non-check non-mate node we compute `improving = eval_stack[ply] > eval_stack[ply-2]` (same-color plies, directly comparable). When NOT improving, LMR reduces one extra ply — a bad eval trend means late quiet moves are even less likely to change the outcome. Startpos d12: 27.4 → 18.0 ms (**-34%**, -29% nodes) — quiet positions where improving stays stable benefit most. Kiwipete d13: essentially flat (tactical positions where improving oscillates cancel the win, but nps compensates for the extra re-searches).
 - ✅ PV-node LMR discount. At genuine PV nodes (non-null window, `beta - alpha > 1`), give back one ply of LMR reduction — moves on the principal variation matter more, and the re-search cost we save more than pays for the deeper reduced probe. Reduction is now clamped both ways: `std::clamp(reduction, 0, depth - 1)` so the discount can't push us into a negative reduction (which would extend, not reduce). Startpos d12: 18 → 17 ms (-5.5%, -7% nodes). Kiwipete d13: +1% time (within noise).
+- ✅ King safety attack-count penalty. Rebel/CPW-style. Per side: `attack_units = Σ WEIGHT[pt] * popcount(piece_attacks & king_ring)` across enemy N/B/R/Q (weights N=2, B=2, R=3, Q=5), indexed into a saturating quadratic table (peak 500 cp at 61+ units). MG-only — the tapered king PST already rewards active endgame kings; layering safety on top would double-count. Per-side queen gate skips the piece scans when the opposing queen is off (arithmetic caps around ~40 cp without a queen; not worth the cycles). `EVAL_LAZY_MARGIN` bumped 500 → 1000 to cover the new ±500 cp swing. Kiwipete d13: +5.5% nodes (fixed piece-scan cost); startpos d13: -11% nodes; middlegame d13: -40% nodes (better move ordering once eval understands king exposure).
+- ✅ Pawn shield bonus. Three-file scan in front of a castled king (king's file ± 1) — pawn on rank 2 = full bonus, rank 3 = partial, rank 4 = trace, none = missing-shield penalty. Gated on castled kings only (wing file, home rank); central-file kings score neutral because "shield" doesn't describe them. Scored independently of the king-safety attack table — a positional feature, not part of the attack arithmetic. MG-only.
+- ✅ Pawn storm penalty. Same three-file scan as shield but on enemy pawns advancing toward the king. Shield asks "am I sheltered now?"; storm asks "how quickly will that shelter dissolve?" — both matter and aren't redundant (castled + intact shield + fast storm = shelter dissolving within moves). Same castling / pawnless gates. MG-only.
+- ✅ King on open / half-open file penalty. Distinct from shield/storm — those measure the shelter's *thickness*, this measures whether a rook or queen can invade the king's file. Wing + home-rank gated, matching the other king-safety terms.
+- ✅ NNUE evaluation (opt-in). HalfKP → 256 → 1 architecture. Per-`Position` accumulator with per-side king-move dirty flags — only the moving side's perspective invalidates on a king move; non-king pieces update in O(features-per-piece) via `put_piece`/`remove_piece` hooks. SIMD hot-loop kernels: NEON on AArch64 (Apple Silicon), AVX2 on x86-64; scalar reference always compiled and pinned by SIMD-vs-reference equivalence tests. Custom **JNN1** binary format (`"JNN1"` magic + `uint32 {version, hidden, features}` header — header-validated on load; not Stockfish-compatible). UCI-gated: off unless `UseNNUE=true` **and** `EvalFile` points to a loadable `.jnn1` — falls back to classical eval on any failure. Companion Python training pipeline (`training/`, uv-scripts) turns self-play data into loadable networks; Python `feature_index()` is pinned against C++ `nnue::feature_index()` in `tests/test_nnue.cpp` so trained networks and inference can't silently drift.
+- ✅ Texel coordinate-descent tuner + PSQ recompute. `./engine tune <dataset>` reads `<FEN>;<outcome>` lines (outcome ∈ {0, 0.5, 1} from WHITE's perspective), fits sigmoid scale K, then coordinate-descends over `eval::params` (13 scalar weights + 5 piece values) to minimize MSE prediction error against the dataset labels. Piece values become independently tunable because PSTs no longer bake the piece value in — `Position::psq_mg/eg` is recomputed from live `eval::params` at eval time instead of being pre-baked at position construction. Suitable for small weight sets; 30-position `tests/data/tune_demo.txt` checked in as a CI smoke test.
+- ✅ SPSA for PST tuning. Simultaneous Perturbation Stochastic Approximation over the 6×64×2 = 768 PST values — two dataset evaluations per iteration regardless of dimensionality, unlike coord descent's per-parameter probe. Invoked via `./engine tune <dataset> pst`; `all` mode runs scalar first, then PST.
+- ✅ Tuning data pipeline. `scripts/fetch_tuning_dataset.py` pulls public labeled corpora (Zurichess quiet-labeled and friends) into `<FEN>;<outcome>` lines. `scripts/gen_selfplay_data.py` generates self-play datasets — the fallback for when public corpora don't reflect this engine's play-style after a big eval change.
+- ✅ SPRT validation harness + nightly CI. Texel loss ≠ Elo, so tuned weights must be validated by real games before shipping. `scripts/sprt.py` drives `fastchess` (`-rounds/-repeat`, `-pgnout file=…`) with a Sequential Probability Ratio Test vs a baseline binary snapshot until H0 (no gain) or H1 (Elo gain) is accepted. `.github/workflows/nightly-sprt.yml` runs the harness against a baseline tag every night; regressions auto-open a GitHub issue, resolved regressions auto-close when the baseline tag bumps (`.github/workflows/baseline-bump.yml`). End-to-end tuning workflow lives in `src/tune.h`'s header comment.
+- ✅ `dump-weights` subcommand. `./engine dump-weights` prints current in-memory `eval::params` + `pst_mg` + `pst_eg` as paste-ready C++ source, so tuned weights transfer to `src/eval.[h|cpp]` without hand transcription. Also invoked automatically at the end of `tune::run_tune`, so a tuning run's output already contains the source fragment.
 
 ## Search / eval performance stack
 
@@ -143,7 +179,9 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
     - `tests/test_search.cpp`   ↔ `src/search.[h|cpp]` (negamax + qsearch + TT + SEE-promo regression)
     - `tests/test_notation.cpp` ↔ `src/notation.[h|cpp]` (UCI move round-trip)
     - `tests/test_uci.cpp`      ↔ `src/uci.[h|cpp]` (protocol via stringstream — `uci_loop` takes `std::istream&/std::ostream&` for exactly this reason; do not reintroduce `std::cin`/`std::cout` inside the loop)
-  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`. Current status: 149 test cases / 270k assertions passing under ASan + UBSan.
+    - `tests/test_nnue.cpp`     ↔ `src/nnue.[h|cpp]` + `src/nnue_simd.h` (HalfKP feature-index round-trip, accumulator incremental-vs-full equivalence, SIMD-vs-scalar kernel equivalence, JNN1 loader/saver round-trip, C++↔Python feature-index pin)
+    - `tests/test_tune.cpp`     ↔ `src/tune.[h|cpp]` (Texel loss monotonicity, sigmoid K fit, coord-descent + SPSA convergence on the checked-in `tune_demo.txt`; dump-weights round-trip)
+  New src units require a matching `tests/test_<unit>.cpp`. Shared fixtures / helpers live in `tests/support.h`. Under ASan + UBSan the doctest suite passes cleanly — see `make test` for the current test/assertion counts.
 - `tests/test_main.cpp` uses `DOCTEST_CONFIG_IMPLEMENT` and provides `main()` — this is the single place where `init_attacks()`, `init_magic()`, `zobrist::init()`, and `eval::init()` are called, so per-TU static-init hacks are unnecessary.
 - Tests link the whole `src/` tree (except `main.cpp`) — see Makefile `$(TEST_SRCS)`.
 - Do not mock `Position` internals. Verify through `to_fen()` / public accessors.
@@ -168,7 +206,6 @@ Do not skip a milestone. Perft numbers stay artificially low until every piece t
 - Multi-threading (Lazy SMP or similar — search stays single-threaded)
 - Pondering (`go ponder`)
 - MultiPV output
-- NNUE / any learned eval
 
 Do not add these speculatively — they each add substantial surface area
 and only pay off once the underlying search + eval is much stronger.
