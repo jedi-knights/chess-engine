@@ -1,4 +1,5 @@
 #pragma once
+#include "nnue_types.h"
 #include "position.h"
 #include "types.h"
 
@@ -52,23 +53,10 @@
 
 namespace nnue {
 
-constexpr int HIDDEN_SIZE      = 256;
-constexpr int PIECES_PER_SIDE  = 5;   // pawn, knight, bishop, rook, queen (king excluded)
-constexpr int FEATURES_PER_KING = 641; // 64 squares × 10 piece slots + 1 padding
-constexpr int TOTAL_FEATURES   = 64 * FEATURES_PER_KING;
-
-// Per-side accumulator — one int32 vector per color per position.
-// Post-transform 8-bit representation is a later optimization; scaffolding
-// uses int32 for numerical clarity.
-struct Accumulator {
-    std::array<int32_t, HIDDEN_SIZE> values[NUM_COLORS] = {};
-    // Marked false at Position construction / set_from_fen; set true
-    // when the accumulator has been (re-)computed for the current
-    // board state. Incremental update in make/unmake keeps it true;
-    // any change that we can't yet handle incrementally falls back to
-    // full recompute.
-    bool computed = false;
-};
+// Constants + Accumulator struct live in nnue_types.h — see there for
+// their definitions and rationale. Split out because `Position`
+// holds an Accumulator by value; that dependency has to break the
+// nnue.h ↔ position.h cycle.
 
 // Network parameters. All values are int32 in the scaffolding for
 // simplicity; a real production runtime uses int8/int16 with
@@ -122,11 +110,27 @@ bool save_network(const std::string& path);
 // convention as `evaluate()`.
 int evaluate(const Position& pos);
 
-// Compute the accumulator for a position from scratch. Called by the
-// forward pass when the position's accumulator is stale (or on any
-// path that hasn't wired up incremental updates yet). Public for
-// tests that verify determinism.
-void refresh_accumulator(const Position& pos, Accumulator& acc);
+// Rebuild any dirty sides of `pos.acc` from scratch. No-op for sides
+// already marked computed. Called lazily by evaluate() before the
+// forward pass; also invokable directly from tests. `Position&` is
+// const because acc is marked `mutable` — refresh is logically-const
+// (populates a cache).
+void refresh_accumulator(const Position& pos);
+
+// Force-refresh both sides regardless of dirty flags. Used by tests
+// that need a known-clean starting state before comparing incremental
+// vs. full-recompute.
+void force_refresh_accumulator(const Position& pos);
+
+// Incremental accumulator updates called from Position::put_piece /
+// remove_piece when a non-king piece enters / leaves the board.
+// Both sides' accumulators are touched (each perspective sees the
+// piece); kings are handled via the dirty-flag path instead. No-op
+// when the network isn't loaded.
+void add_piece_to_accumulator(const Position& pos, Accumulator& acc,
+                              Square sq, PieceType pt, Color piece_color);
+void sub_piece_from_accumulator(const Position& pos, Accumulator& acc,
+                                Square sq, PieceType pt, Color piece_color);
 
 // Map (king_sq, piece_sq, piece_type, piece_color) → feature index
 // for a given "perspective" (which side's king the features are

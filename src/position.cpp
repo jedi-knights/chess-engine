@@ -1,6 +1,7 @@
 #include "position.h"
 #include "bitboard.h"
 #include "eval.h"
+#include "nnue.h"
 #include "zobrist.h"
 
 #include <algorithm>
@@ -47,6 +48,12 @@ void Position::clear() {
     psq_mg[WHITE] = psq_mg[BLACK] = 0;
     psq_eg[WHITE] = psq_eg[BLACK] = 0;
     history_size    = 0;
+    // NNUE accumulator marked dirty — set_from_fen and the make/unmake
+    // hot path bypass put_piece for bitboard reasons, so incremental
+    // updates would leave stale weights. Next evaluate() triggers a
+    // refresh from the (now correct) bitboards.
+    acc.computed[WHITE] = false;
+    acc.computed[BLACK] = false;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) — FEN parsing is inherently a multi-field state machine; splitting into helpers would be more lines and no clearer.
@@ -220,6 +227,18 @@ void Position::put_piece(Square s, Piece p) {
     }
     psq_mg[c]                   += eval::psq_mg(c, pt, s);
     psq_eg[c]                   += eval::psq_eg(c, pt, s);
+    // NNUE incremental accumulator update. Kings themselves aren't
+    // in the HalfKP feature set, but moving them invalidates every
+    // feature from that side's perspective (all features are keyed
+    // on the friendly king square) — mark dirty and let refresh
+    // rebuild. Non-king pieces add their feature column to both
+    // perspectives; the columns come from the loaded network so this
+    // is a no-op when NNUE isn't loaded.
+    if (pt == KING) {
+        acc.computed[c] = false;
+    } else if (nnue::is_loaded()) {
+        nnue::add_piece_to_accumulator(*this, acc, s, pt, c);
+    }
 }
 
 void Position::remove_piece(Square s) {
@@ -227,6 +246,15 @@ void Position::remove_piece(Square s) {
     assert(p != NO_PIECE);
     Color     c  = color_of(p);
     PieceType pt = type_of(p);
+    // NNUE incremental subtract must run BEFORE the bitboard clear
+    // so refresh_accumulator's fallback path (if triggered later)
+    // still sees the king square. Kings again mark dirty; non-kings
+    // subtract their column from both perspectives.
+    if (pt == KING) {
+        acc.computed[c] = false;
+    } else if (nnue::is_loaded()) {
+        nnue::sub_piece_from_accumulator(*this, acc, s, pt, c);
+    }
     board[s]                     = NO_PIECE;
     Bitboard bb                  = square_bb(s);
     pieces[c][pt]               &= ~bb;

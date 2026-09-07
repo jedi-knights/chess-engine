@@ -48,43 +48,101 @@ int feature_index(Color perspective, Square king_sq, Square piece_sq,
     return int(kk) * FEATURES_PER_KING + int(ps) * (2 * PIECES_PER_SIDE) + slot;
 }
 
-void refresh_accumulator(const ::Position& pos, Accumulator& acc) {
-    if (!g_loaded) {
-        // Without a loaded network, refresh is a no-op that leaves
-        // the accumulator in its default (all-zero) state. Callers
-        // that reach this path with `use_nnue()` enabled shouldn't —
-        // eval.cpp checks is_loaded() before calling.
-        acc.computed = true;
+namespace {
+
+// Recompute one side's accumulator from scratch. Reads current
+// board state via bitboards; kings themselves excluded from the
+// feature sum (HalfKP: king square is the reference, not a feature).
+// No-op when the friendly king isn't on the board (artificial test
+// positions).
+void refresh_side(const ::Position& pos, Accumulator& acc, Color persp) {
+    // Bias initialization: int16 biases widened element-wise into
+    // int32 accumulator slots.
+    for (int i = 0; i < HIDDEN_SIZE; ++i) {
+        acc.values[persp][i] = g_network->feature_biases[i];
+    }
+    const Bitboard king_bb = pos.pieces[persp][KING];
+    if (king_bb == 0U) {
+        acc.computed[persp] = true;
         return;
     }
-    for (int c = 0; c < NUM_COLORS; ++c) {
-        const Color persp = Color(c);
-        // Widen int16 biases → int32 accumulator. Element-wise;
-        // std::array of different value_type doesn't cross-assign.
-        for (int i = 0; i < HIDDEN_SIZE; ++i) {
-            acc.values[c][i] = g_network->feature_biases[i];
-        }
-        const Bitboard king_bb = pos.pieces[persp][KING];
-        if (king_bb == 0U) {
-            continue;  // artificial no-king position; leave biases only
-        }
-        const Square king_sq = lsb(king_bb);
-        for (int pc = 0; pc < NUM_COLORS; ++pc) {
-            for (int pt = PAWN; pt <= QUEEN; ++pt) {
-                Bitboard b = pos.pieces[pc][pt];
-                while (b != 0U) {
-                    const Square s = pop_lsb(b);
-                    const int idx = feature_index(
-                        persp, king_sq, s, PieceType(pt), Color(pc));
-                    const auto& col = g_network->feature_weights[idx];
-                    for (int i = 0; i < HIDDEN_SIZE; ++i) {
-                        acc.values[c][i] += col[i];
-                    }
+    const Square king_sq = lsb(king_bb);
+    for (int pc = 0; pc < NUM_COLORS; ++pc) {
+        for (int pt = PAWN; pt <= QUEEN; ++pt) {
+            Bitboard b = pos.pieces[pc][pt];
+            while (b != 0U) {
+                const Square s = pop_lsb(b);
+                const int idx = feature_index(
+                    persp, king_sq, s, PieceType(pt), Color(pc));
+                const auto& col = g_network->feature_weights[idx];
+                for (int i = 0; i < HIDDEN_SIZE; ++i) {
+                    acc.values[persp][i] += col[i];
                 }
             }
         }
     }
-    acc.computed = true;
+    acc.computed[persp] = true;
+}
+
+}  // namespace
+
+void refresh_accumulator(const ::Position& pos) {
+    if (!g_loaded) {
+        // Without a loaded network the accumulator is meaningless
+        // anyway; callers under use_nnue() gate first, so this only
+        // fires in tests. Mark both sides "computed" (== all-zero
+        // biases) so the check-and-refresh logic doesn't loop.
+        pos.acc.computed[WHITE] = true;
+        pos.acc.computed[BLACK] = true;
+        return;
+    }
+    if (!pos.acc.computed[WHITE]) { refresh_side(pos, pos.acc, WHITE); }
+    if (!pos.acc.computed[BLACK]) { refresh_side(pos, pos.acc, BLACK); }
+}
+
+void force_refresh_accumulator(const ::Position& pos) {
+    if (!g_loaded) { return; }
+    refresh_side(pos, pos.acc, WHITE);
+    refresh_side(pos, pos.acc, BLACK);
+}
+
+// Add / subtract a piece's feature column from both perspectives'
+// accumulators. Called from Position::put_piece / remove_piece
+// exclusively — bypasses the dirty check because the caller has
+// already handled the king case. If either perspective is currently
+// dirty the update is technically wasted work (refresh will rebuild
+// from scratch anyway), but that's cheap enough to just do
+// unconditionally rather than branch per side.
+void add_piece_to_accumulator(const ::Position& pos, Accumulator& acc,
+                              Square sq, PieceType pt, Color piece_color) {
+    if (!g_loaded) { return; }
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        const Color persp   = Color(c);
+        const Bitboard kbb  = pos.pieces[persp][KING];
+        if (kbb == 0U) { continue; }
+        const Square king_sq = lsb(kbb);
+        const int    idx     = feature_index(persp, king_sq, sq, pt, piece_color);
+        const auto&  col     = g_network->feature_weights[idx];
+        for (int i = 0; i < HIDDEN_SIZE; ++i) {
+            acc.values[c][i] += col[i];
+        }
+    }
+}
+
+void sub_piece_from_accumulator(const ::Position& pos, Accumulator& acc,
+                                Square sq, PieceType pt, Color piece_color) {
+    if (!g_loaded) { return; }
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        const Color persp   = Color(c);
+        const Bitboard kbb  = pos.pieces[persp][KING];
+        if (kbb == 0U) { continue; }
+        const Square king_sq = lsb(kbb);
+        const int    idx     = feature_index(persp, king_sq, sq, pt, piece_color);
+        const auto&  col     = g_network->feature_weights[idx];
+        for (int i = 0; i < HIDDEN_SIZE; ++i) {
+            acc.values[c][i] -= col[i];
+        }
+    }
 }
 
 bool is_loaded() { return g_loaded; }
@@ -227,12 +285,13 @@ bool save_network(const std::string& path) {
 
 int evaluate(const ::Position& pos) {
     assert(is_loaded());
-    // Full-recompute forward pass. Incremental accumulator updates
-    // in make/unmake come next; for now we pay the ~30 popcount
-    // cost per eval. The Accumulator struct isn't yet a Position
-    // member — scaffolding computes into a stack local.
-    Accumulator acc;
-    refresh_accumulator(pos, acc);
+    // Lazily refresh any dirty sides of the per-Position accumulator.
+    // Non-king piece movement already updated `pos.acc` incrementally
+    // via put_piece / remove_piece; king moves and set_from_fen mark
+    // the affected side(s) dirty so this call rebuilds them from
+    // scratch. `pos.acc` is `mutable`, so this stays const from the
+    // caller's perspective (logically-const cache refresh).
+    refresh_accumulator(pos);
 
     // Clipped ReLU (Stockfish-compat activation): clamp to [0, 127].
     // Then dot with the output weight vector. Concatenation order is
@@ -241,13 +300,13 @@ int evaluate(const ::Position& pos) {
     const int opp = stm ^ 1;
     int64_t sum = int64_t(g_network->output_bias);
     for (int i = 0; i < HIDDEN_SIZE; ++i) {
-        int32_t v = acc.values[stm][i];
+        int32_t v = pos.acc.values[stm][i];
         if (v < 0)   { v = 0; }
         if (v > 127) { v = 127; }
         sum += int64_t(g_network->output_weights[i]) * v;
     }
     for (int i = 0; i < HIDDEN_SIZE; ++i) {
-        int32_t v = acc.values[opp][i];
+        int32_t v = pos.acc.values[opp][i];
         if (v < 0)   { v = 0; }
         if (v > 127) { v = 127; }
         sum += int64_t(g_network->output_weights[HIDDEN_SIZE + i]) * v;

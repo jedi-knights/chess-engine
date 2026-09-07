@@ -1,4 +1,5 @@
 #pragma once
+#include "nnue_types.h"
 #include "types.h"
 #include <string>
 
@@ -62,6 +63,15 @@ struct Position {
     static constexpr int HISTORY_CAPACITY = 1024;
     uint64_t history[HISTORY_CAPACITY] = {};
     int      history_size              = 0;
+
+    // NNUE accumulator, updated incrementally by put_piece / remove_piece
+    // when NNUE is loaded. `mutable` so nnue::evaluate(const Position&)
+    // can lazily refresh dirty sides through pos.acc without threading
+    // non-const Position& through eval-only call sites. Default-
+    // constructed accumulator is marked dirty (computed[c] = false)
+    // so the first evaluate() call triggers a full recompute — no risk
+    // of using uninitialized values.
+    mutable nnue::Accumulator acc;
 
     void        clear();
     bool        set_from_fen(const std::string& fen);
