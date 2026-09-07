@@ -9,3 +9,7 @@ coverage/
 .cache/
 compile_commands.json
 TODO.md
+
+# Python (training pipeline)
+__pycache__/
+*.pyc
