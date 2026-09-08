@@ -108,6 +108,24 @@ MATE_SCORE_CP = 30000
 ENGINE_MATE_CP_THRESHOLD = 30000
 
 
+def parse_engine_options(pairs: list[str]) -> dict[str, str]:
+    """Parse ``KEY=VALUE`` argparse tokens into a dict for engine.configure.
+
+    Only the first ``=`` is treated as a separator, so values containing
+    ``=`` (paths with query-like segments, EPD lines) survive intact.
+    Raises ValueError on a token missing ``=`` so the caller can surface
+    a clear error rather than silently dropping the option (the silent-
+    drop failure mode is "user thinks NNUE loaded but it never was").
+    """
+    result: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ValueError(f"--engine-option token {pair!r} is not KEY=VALUE")
+        key, value = pair.split("=", 1)
+        result[key] = value
+    return result
+
+
 def format_score_label(pov_score: chess.engine.PovScore) -> str:
     """Format a python-chess PovScore as a centipawn label string.
 
@@ -329,7 +347,23 @@ def main() -> int:
         "Higher = better quality per position but linearly slower. "
         "Ignored when --label=wdl (default: %(default)s)",
     )
+    ap.add_argument(
+        "--engine-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="UCI option sent to the engine after startup, repeatable. "
+        "Enables self-bootstrap workflows — e.g. --engine-option UseNNUE=true "
+        "--engine-option EvalFile=/path/to/net.jnn1 makes both self-play "
+        "and score-labeling use the loaded NNUE instead of classical eval",
+    )
     args = ap.parse_args()
+
+    try:
+        engine_options = parse_engine_options(args.engine_option)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     if not args.engine.exists():
         print(
@@ -359,6 +393,19 @@ def main() -> int:
     except (chess.engine.EngineError, OSError) as e:
         print(f"ERROR: failed to start engine: {e}", file=sys.stderr)
         return 1
+
+    if engine_options:
+        try:
+            engine.configure(engine_options)
+        except chess.engine.EngineError as e:
+            print(
+                f"ERROR: engine rejected --engine-option {engine_options}: {e}",
+                file=sys.stderr,
+            )
+            engine.quit()
+            return 1
+        opts_str = ", ".join(f"{k}={v}" for k, v in engine_options.items())
+        print(f"Engine configured: {opts_str}", file=sys.stderr)
 
     rng = random.Random(args.seed)
     args.output.parent.mkdir(parents=True, exist_ok=True)
