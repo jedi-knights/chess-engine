@@ -179,15 +179,19 @@ This repo's NNUE stack (all shipped, all off by default):
 
 ### Loading a network at runtime
 
+A default network ships in [`nets/default.jnn1`](nets/default.jnn1) — the peak of a 4-round self-bootstrap chain (see [`nets/README.md`](nets/README.md) for provenance). Enable it per-run:
+
 ```bash
 $ ./engine
-setoption name EvalFile value /abs/path/to/net.jnn1
+setoption name EvalFile value nets/default.jnn1
 setoption name UseNNUE value true
 position startpos
 go depth 8
 ```
 
-The engine logs `nnue: loaded '<path>' (256 hidden units, 41024 features)` on success and emits `info string EvalFile loaded: <path>`. A missing / mistyped / architecture-mismatched file is rejected and the engine keeps whatever eval mode was active before.
+Order matters — set `EvalFile` before `UseNNUE=true` to avoid a transient `info string UseNNUE=true but no network loaded` warning. The engine logs `nnue: loaded '<path>' (256 hidden units, 41024 features)` on success and emits `info string EvalFile loaded: <path>`. A missing / mistyped / architecture-mismatched file is rejected and the engine keeps whatever eval mode was active before.
+
+**Note:** at present the classical eval measurably outplays the shipped NNUE in gameplay — the network is +130 Elo over its own WDL-trained seed but still loses to classical. Enable NNUE for experimentation; leave it off (the default) for competitive play.
 
 ### Training a network
 
