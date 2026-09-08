@@ -111,6 +111,42 @@ def test_format_score_label_preserves_large_but_reasonable_cp():
     assert gen.format_score_label(_cp_score(-2500)) == "-2500"
 
 
+# --- parse_engine_options: --engine-option KEY=VALUE handling ---------------
+
+
+def test_parse_engine_options_empty_list_returns_empty_dict():
+    assert gen.parse_engine_options([]) == {}
+
+
+def test_parse_engine_options_single_pair():
+    assert gen.parse_engine_options(["UseNNUE=true"]) == {"UseNNUE": "true"}
+
+
+def test_parse_engine_options_multiple_pairs():
+    got = gen.parse_engine_options(["UseNNUE=true", "EvalFile=/tmp/net.jnn1"])
+    assert got == {"UseNNUE": "true", "EvalFile": "/tmp/net.jnn1"}
+
+
+def test_parse_engine_options_preserves_equals_in_value():
+    """A value containing `=` (like a URL with query params or an EPD
+    line with `c9 "..."` operations) must keep everything after the
+    first `=` intact."""
+    got = gen.parse_engine_options(["EvalFile=/path/with=equals/net.jnn1"])
+    assert got == {"EvalFile": "/path/with=equals/net.jnn1"}
+
+
+def test_parse_engine_options_rejects_missing_equals():
+    """A token with no `=` is a user error — surface it, don't silently
+    ignore. Silent-ignore is the failure mode where the user thinks
+    NNUE is loaded but it never was."""
+    try:
+        gen.parse_engine_options(["justakey"])
+    except ValueError as e:
+        assert "justakey" in str(e), f"error should name the bad token: {e}"
+    else:
+        raise AssertionError("expected ValueError for token without `=`")
+
+
 # ----------------------------------------------------------------------------
 
 TESTS = [
@@ -123,6 +159,11 @@ TESTS = [
     test_format_score_label_clamps_engine_cp_mate_signal_positive,
     test_format_score_label_clamps_engine_cp_mate_signal_negative,
     test_format_score_label_preserves_large_but_reasonable_cp,
+    test_parse_engine_options_empty_list_returns_empty_dict,
+    test_parse_engine_options_single_pair,
+    test_parse_engine_options_multiple_pairs,
+    test_parse_engine_options_preserves_equals_in_value,
+    test_parse_engine_options_rejects_missing_equals,
 ]
 
 
