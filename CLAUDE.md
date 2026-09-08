@@ -77,6 +77,10 @@ scripts/            Python helpers for the tuning workflow
 training/           Python NNUE trainer (uv-scripts) — turns self-play data into
                     loadable `.jnn1` networks. See training/README.md for details;
                     `feature_index()` pinned against C++ in tests/test_nnue.cpp.
+nets/               Shipped NNUE weight files (JNN1 format, HalfKP → 256 → 1).
+                    `default.jnn1` is the peak of a 4-round self-bootstrap chain
+                    from a 500-game WDL seed; see nets/README.md for provenance
+                    + reproduction. Off by default — load via UCI's EvalFile.
 ```
 
 ## Movegen milestone roadmap
