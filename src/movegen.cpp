@@ -22,12 +22,18 @@ constexpr Bitboard RANK_2_BB = 0x000000000000FF00ULL;
 // Emit one normal/ep move OR four promotion moves (Q, R, B, N) when the
 // destination sits on the promotion rank.
 inline void emit_pawn_move(Square from, Square to, Bitboard promo_rank,
-                           MoveType mt, MoveList& moves) {
+                           MoveType mt, MoveList& moves, bool allow_king_promo = false) {
     if ((square_bb(to) & promo_rank) != 0U) {
         moves.push_back(make_move(from, to, MT_PROMOTION, QUEEN));
         moves.push_back(make_move(from, to, MT_PROMOTION, ROOK));
         moves.push_back(make_move(from, to, MT_PROMOTION, BISHOP));
         moves.push_back(make_move(from, to, MT_PROMOTION, KNIGHT));
+        if (allow_king_promo) {
+            // Antichess-only: pawn can promote to king. The promo
+            // field in the Move encoding is unused for MT_PROMOTION_KING;
+            // make_move handles it directly.
+            moves.push_back(make_move(from, to, MT_PROMOTION_KING));
+        }
     } else {
         moves.push_back(make_move(from, to, mt));
     }
@@ -42,6 +48,7 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
     const Bitboard empty = ~pos.occupied;
     const Bitboard enemy = pos.colors[Color(us ^ 1)];
     const Bitboard pawns = pos.pieces[us][PAWN];
+    const bool allow_king_promo = (pos.rules == RV_ANTICHESS);
 
     if (us == WHITE) {
         Bitboard single = (pawns << 8) & empty;
@@ -65,13 +72,13 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
         }
 
         while (single != 0U) { Square to = pop_lsb(single);
-                         emit_pawn_move(Square(to - 8),  to, RANK_8_BB, MT_NORMAL, moves); }
+                         emit_pawn_move(Square(to - 8),  to, RANK_8_BB, MT_NORMAL, moves, allow_king_promo); }
         while (dbl != 0U)    { Square to = pop_lsb(dbl);
                          moves.push_back(make_move(Square(to - 16), to)); }
         while (cap_nw != 0U) { Square to = pop_lsb(cap_nw);
-                         emit_pawn_move(Square(to - 7),  to, RANK_8_BB, MT_NORMAL, moves); }
+                         emit_pawn_move(Square(to - 7),  to, RANK_8_BB, MT_NORMAL, moves, allow_king_promo); }
         while (cap_ne != 0U) { Square to = pop_lsb(cap_ne);
-                         emit_pawn_move(Square(to - 9),  to, RANK_8_BB, MT_NORMAL, moves); }
+                         emit_pawn_move(Square(to - 9),  to, RANK_8_BB, MT_NORMAL, moves, allow_king_promo); }
 
         if (pos.ep_square != NO_SQUARE) {
             Bitboard ep_bb = square_bb(pos.ep_square);
@@ -96,13 +103,13 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
         }
 
         while (single != 0U) { Square to = pop_lsb(single);
-                         emit_pawn_move(Square(to + 8),  to, RANK_1_BB, MT_NORMAL, moves); }
+                         emit_pawn_move(Square(to + 8),  to, RANK_1_BB, MT_NORMAL, moves, allow_king_promo); }
         while (dbl != 0U)    { Square to = pop_lsb(dbl);
                          moves.push_back(make_move(Square(to + 16), to)); }
         while (cap_se != 0U) { Square to = pop_lsb(cap_se);
-                         emit_pawn_move(Square(to + 7),  to, RANK_1_BB, MT_NORMAL, moves); }
+                         emit_pawn_move(Square(to + 7),  to, RANK_1_BB, MT_NORMAL, moves, allow_king_promo); }
         while (cap_sw != 0U) { Square to = pop_lsb(cap_sw);
-                         emit_pawn_move(Square(to + 9),  to, RANK_1_BB, MT_NORMAL, moves); }
+                         emit_pawn_move(Square(to + 9),  to, RANK_1_BB, MT_NORMAL, moves, allow_king_promo); }
 
         if (pos.ep_square != NO_SQUARE) {
             Bitboard ep_bb = square_bb(pos.ep_square);

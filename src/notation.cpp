@@ -27,6 +27,8 @@ std::string move_to_uci(Move m) {
     s += char('1' + rank_of(to));
     if (move_type(m) == MT_PROMOTION) {
         s += "nbrq"[move_promotion(m) - KNIGHT];
+    } else if (move_type(m) == MT_PROMOTION_KING) {
+        s += 'k';
     }
     return s;
 }
@@ -92,12 +94,17 @@ Move parse_uci_move(const Position& pos, const std::string& uci) {
         if (uci.size() != 5) {
             return NULL_MOVE;
         }
-        mt = MT_PROMOTION;
         switch (uci[4]) {
-            case 'n': promo = KNIGHT; break;
-            case 'b': promo = BISHOP; break;
-            case 'r': promo = ROOK;   break;
-            case 'q': promo = QUEEN;  break;
+            case 'n': mt = MT_PROMOTION;      promo = KNIGHT; break;
+            case 'b': mt = MT_PROMOTION;      promo = BISHOP; break;
+            case 'r': mt = MT_PROMOTION;      promo = ROOK;   break;
+            case 'q': mt = MT_PROMOTION;      promo = QUEEN;  break;
+            // Antichess only: pawn can promote to king. Standard
+            // chess rejects this at the move-legality step (king-
+            // count would exceed 1). parse_uci_move just returns the
+            // encoded move; it's up to generate_moves/make_move to
+            // decide legality.
+            case 'k': mt = MT_PROMOTION_KING; promo = KNIGHT; break;
             default: return NULL_MOVE;
         }
     }

@@ -84,6 +84,13 @@ enum MoveType : std::uint8_t {
     // from field is unused; to holds the destination; drop piece
     // type lives in bits 17-19 (see `move_drop_piece_type`).
     MT_DROP       = 4,
+    // Antichess only: pawn reaching the back rank promotes to KING.
+    // The promo field is not read in this move type (there is only
+    // one target piece type for king-promotion). Standard chess
+    // movegen never emits this; only antichess does. make_move's
+    // king-count assertion is skipped for RV_ANTICHESS so a second
+    // king on the board is allowed.
+    MT_PROMOTION_KING = 5,
 };
 
 constexpr Move make_move(Square from, Square to,
