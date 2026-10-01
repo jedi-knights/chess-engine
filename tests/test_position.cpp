@@ -329,3 +329,34 @@ TEST_CASE("Chess960: FRC castle make/unmake round-trips") {
     CHECK(pos.board[C1] == W_KING);
     CHECK(pos.board[H1] == W_ROOK);
 }
+
+
+TEST_CASE("Three-check: parses +N+M field and emits it on round-trip when variant is set") {
+    Position pos;
+    pos.rules = RV_THREE_CHECK;
+    REQUIRE(pos.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 +2+1"));
+    CHECK(pos.checks_delivered[WHITE] == 1);  // 3 - 2 = 1 check delivered to white
+    CHECK(pos.checks_delivered[BLACK] == 2);  // 3 - 1 = 2 checks delivered to black
+    CHECK(pos.to_fen() == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 +2+1");
+}
+
+TEST_CASE("Three-check: standard-variant FEN round-trip is unaffected (no +N+M appended)") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"));
+    CHECK(pos.rules == RV_STANDARD);
+    CHECK(pos.to_fen() == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+}
+
+TEST_CASE("Three-check: make_move increments checks_delivered when opponent is left in check") {
+    Position pos;
+    pos.rules = RV_THREE_CHECK;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/3Q4/8/8/4K3 w - - 0 1 +3+3"));
+    // Queen D4 -> E3: queen on E3 attacks the e-file including the king on E8.
+    Move m = make_move(D4, E3);
+    UndoInfo u;
+    pos.make_move(m, u);
+    CHECK(pos.checks_delivered[BLACK] == 1);
+    CHECK(pos.checks_delivered[WHITE] == 0);
+    pos.unmake_move(m, u);
+    CHECK(pos.checks_delivered[BLACK] == 0);  // restored by UndoInfo
+}

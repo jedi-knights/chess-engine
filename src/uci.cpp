@@ -126,6 +126,8 @@ void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
         // variant doesn't leave the engine in a mystery state.
         if (value == "kingofthehill" || value == "kingOfTheHill") {
             pos.rules = RV_KOTH;
+        } else if (value == "threeCheck" || value == "threecheck" || value == "3check") {
+            pos.rules = RV_THREE_CHECK;
         } else {
             pos.rules = RV_STANDARD;
         }

@@ -61,8 +61,9 @@ using Move = uint16_t;
 // `setoption name UCI_Variant value kingofthehill` persists across
 // subsequent `position` commands.
 enum RuleVariant : std::uint8_t {
-    RV_STANDARD = 0,
-    RV_KOTH     = 1,
+    RV_STANDARD    = 0,
+    RV_KOTH        = 1,
+    RV_THREE_CHECK = 2,
 };
 
 enum MoveType : std::uint8_t {
