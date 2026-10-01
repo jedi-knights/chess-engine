@@ -178,3 +178,25 @@ TEST_CASE("round-trip: parse_uci_move(move_to_uci(m)) == m for every legal move"
         }
     }
 }
+
+
+TEST_CASE("parse_uci_move: Crazyhouse drop notation parses to MT_DROP") {
+    Position pos;
+    REQUIRE(pos.set_from_fen(STARTPOS_FEN));
+    Move m = parse_uci_move(pos, "P@e4");
+    CHECK(move_type(m) == MT_DROP);
+    CHECK(move_to(m)   == E4);
+    CHECK(move_drop_piece_type(m) == PAWN);
+
+    Move q = parse_uci_move(pos, "Q@d5");
+    CHECK(move_type(q) == MT_DROP);
+    CHECK(move_to(q)   == D5);
+    CHECK(move_drop_piece_type(q) == QUEEN);
+}
+
+TEST_CASE("move_to_uci: MT_DROP emits P@sq / Q@sq form") {
+    Move m = make_drop_move(E4, PAWN);
+    CHECK(move_to_uci(m) == "P@e4");
+    Move q = make_drop_move(D5, QUEEN);
+    CHECK(move_to_uci(q) == "Q@d5");
+}
