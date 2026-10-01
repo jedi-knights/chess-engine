@@ -71,6 +71,59 @@ TEST_CASE("parse_uci_move: king moving 2 files → MT_CASTLING") {
     CHECK(move_type(parse_uci_move(pos, "e1c1")) == MT_CASTLING);
 }
 
+TEST_CASE("parse_uci_move: king-captures-own-rook form is castling in both classical and Chess960") {
+    // Classical startpos layout: king on e1, rooks on a1/h1. The
+    // king-captures-own-rook UCI form (e1h1, e1a1) is what Lichess's
+    // Bot API sends; it must parse to MT_CASTLING regardless of whether
+    // UCI_Chess960 has been toggled on, because the king's actual
+    // target (g1 / c1) is derived from direction, not from the move
+    // string.
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1"));
+    Move ks = parse_uci_move(pos, "e1h1");
+    CHECK(move_type(ks) == MT_CASTLING);
+    CHECK(move_from(ks) == E1);
+    CHECK(move_to(ks)   == G1);  // internal encoding normalizes to king_to
+    Move qs = parse_uci_move(pos, "e1a1");
+    CHECK(move_type(qs) == MT_CASTLING);
+    CHECK(move_to(qs)   == C1);
+}
+
+TEST_CASE("parse_uci_move: FRC king-captures-own-rook with non-classical rook file") {
+    // Chess960 position: king on D1, rooks on B1 and F1 (variant Shredder
+    // castling-rights "BFbf"). Kingside castle in UCI is "d1f1" (king
+    // captures own rook on F1); king's actual target is still G1.
+    Position pos;
+    REQUIRE(pos.set_from_fen("nrkbnqbr/pppppppp/8/8/8/8/PPPPPPPP/NRKBNQBR w HBhb - 0 1"));
+    Move qs = parse_uci_move(pos, "c1b1");  // king on C1, queenside rook on B1
+    CHECK(move_type(qs) == MT_CASTLING);
+    CHECK(move_from(qs) == C1);
+    CHECK(move_to(qs)   == C1);  // king_to for queenside is C-file; king doesn't actually move
+    Move ks = parse_uci_move(pos, "c1h1");  // king on C1, kingside rook on H1
+    CHECK(move_type(ks) == MT_CASTLING);
+    CHECK(move_to(ks)   == G1);
+}
+
+TEST_CASE("move_to_uci_output: FRC emits king-captures-own-rook when UCI_Chess960 is set") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("nrkbnqbr/pppppppp/8/8/8/8/PPPPPPPP/NRKBNQBR w HBhb - 0 1"));
+    CHECK(pos.is_chess960);  // inferred from king not on E file
+    // Kingside castle: internal from=C1, to=G1.
+    Move ks = make_move(C1, G1, MT_CASTLING);
+    CHECK(move_to_uci_output(ks, pos) == "c1h1");  // rook_from = H1
+    // Queenside castle: internal from=C1, to=C1 (king stays).
+    Move qs = make_move(C1, C1, MT_CASTLING);
+    CHECK(move_to_uci_output(qs, pos) == "c1b1");  // rook_from = B1
+}
+
+TEST_CASE("move_to_uci_output: standard positions get classical form regardless") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"));
+    CHECK(!pos.is_chess960);
+    Move ks = make_move(E1, G1, MT_CASTLING);
+    CHECK(move_to_uci_output(ks, pos) == "e1g1");
+}
+
 TEST_CASE("parse_uci_move: pawn to ep_square → MT_EN_PASSANT") {
     Position pos;
     REQUIRE(pos.set_from_fen("4k3/8/8/2pP4/8/8/8/4K3 w - c6 0 1"));

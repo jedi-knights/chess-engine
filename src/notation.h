@@ -14,6 +14,12 @@
 // "0000" per the UCI convention for "no legal move to report".
 std::string move_to_uci(Move m);
 
+// FRC-aware serializer: re-encodes a castling move as king-captures-own-
+// rook ("e1h1") when `pos.is_chess960` is set, otherwise identical to
+// `move_to_uci`. The UCI emission layer (uci.cpp) calls this when
+// shipping a bestmove so Lichess's Bot API gets the form it expects.
+std::string move_to_uci_output(Move m, const Position& pos);
+
 // Parse a UCI-formatted move against `pos`. Returns NULL_MOVE for any
 // malformed input (wrong length, out-of-range squares, empty from-square,
 // promotion without piece char, unknown promotion piece). Move-legality
