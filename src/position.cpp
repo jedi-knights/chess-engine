@@ -1,6 +1,7 @@
 #include "position.h"
 #include "bitboard.h"
 #include "eval.h"
+#include "movegen.h"
 #include "nnue.h"
 #include "zobrist.h"
 
@@ -54,6 +55,8 @@ void Position::clear() {
     castling_rook_file[WHITE][QUEENSIDE] = FILE_A;
     castling_rook_file[BLACK][KINGSIDE]  = FILE_H;
     castling_rook_file[BLACK][QUEENSIDE] = FILE_A;
+    checks_delivered[WHITE] = 0;
+    checks_delivered[BLACK] = 0;
     // Deliberately NOT resetting `is_chess960` -- the UCI_Chess960 option
     // is engine-persistent across FEN loads, and set_from_fen only ever
     // upgrades it to true (never back to false). An explicit option
@@ -78,6 +81,26 @@ bool Position::set_from_fen(const std::string& fen) {
         return false;
     }
     ss >> halfmove_clock >> fullmove_number;
+    // Three-check: Lichess appends `+<remaining-white>+<remaining-black>`
+    // after the standard FEN fields. Both start at 3 and decrement when
+    // the matching color is checked. We store the inverse ("checks
+    // delivered to color c") = 3 - remaining. A missing field defaults
+    // to {0, 0} delivered (startpos). Any parse failure (malformed +
+    // field, out-of-range numbers) silently falls back to {0, 0}.
+    {
+        std::string tc_field;
+        if (ss >> tc_field && tc_field.size() >= 3 && tc_field[0] == '+') {
+            size_t plus2 = tc_field.find('+', 1);
+            if (plus2 != std::string::npos) {
+                int rw = std::atoi(tc_field.substr(1, plus2 - 1).c_str());
+                int rb = std::atoi(tc_field.substr(plus2 + 1).c_str());
+                if (rw >= 0 && rw <= 3 && rb >= 0 && rb <= 3) {
+                    checks_delivered[WHITE] = std::uint8_t(3 - rw);
+                    checks_delivered[BLACK] = std::uint8_t(3 - rb);
+                }
+            }
+        }
+    }
 
     int r = 7;
     int f = 0;
@@ -277,6 +300,14 @@ std::string Position::to_fen() const {
         o << char('a' + file_of(ep_square)) << char('1' + rank_of(ep_square));
     }
     o << ' ' << halfmove_clock << ' ' << fullmove_number;
+    // Three-check: append `+<rem-white>+<rem-black>` after the
+    // standard FEN tail when the variant is active, matching Lichess's
+    // encoding. Omitting it when `rules != RV_THREE_CHECK` keeps every
+    // existing round-trip test byte-identical.
+    if (rules == RV_THREE_CHECK) {
+        o << " +" << int(3 - checks_delivered[WHITE])
+          << "+"  << int(3 - checks_delivered[BLACK]);
+    }
     return o.str();
 }
 
@@ -395,6 +426,8 @@ void Position::make_move(Move m, UndoInfo& u) {
     u.halfmove_clock = halfmove_clock;
     u.key            = key;
     u.pawn_key       = pawn_key;
+    u.prev_checks[WHITE] = checks_delivered[WHITE];
+    u.prev_checks[BLACK] = checks_delivered[BLACK];
     if (mt == MT_EN_PASSANT) {
         u.captured = Piece(us == WHITE ? B_PAWN : W_PAWN);
     } else if (mt == MT_CASTLING) {
@@ -488,6 +521,17 @@ void Position::make_move(Move m, UndoInfo& u) {
     }
     side_to_move = them;
 
+    // Three-check accounting: after flipping side_to_move, the position
+    // now reflects "opponent to move." If opponent's king is attacked,
+    // our move delivered a check -- bump the counter the opponent's
+    // slot tracks. Only runs when the variant is active; standard
+    // chess leaves the counters at their initial {0, 0} value.
+    if (rules == RV_THREE_CHECK) {
+        if (in_check(*this)) {
+            ++checks_delivered[them];
+        }
+    }
+
     // Roll the new castling / ep / side keys IN. SIDE toggles on every
     // move (XOR is self-inverse) regardless of which color moved. EP
     // hash matches compute()'s rule (pseudo-legal only).
@@ -564,6 +608,8 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
     ep_square      = u.ep_square;
     castling       = u.castling;
     halfmove_clock = u.halfmove_clock;
+    checks_delivered[WHITE] = u.prev_checks[WHITE];
+    checks_delivered[BLACK] = u.prev_checks[BLACK];
     // Snapshot restore beats redoing all the incremental XORs by hand —
     // and it's what tests check against (compute(pos) after unmake must
     // equal the pre-move key). Pawn key is fully rebuildable from the

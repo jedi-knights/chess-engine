@@ -22,6 +22,11 @@ struct UndoInfo {
     int      halfmove_clock = 0;
     uint64_t key            = 0;          // Zobrist key snapshot for unmake
     uint64_t pawn_key       = 0;          // pawn-only Zobrist snapshot (for pawn hash)
+    // Three-check only: snapshot of the "checks delivered to <color>"
+    // counter the move might increment (we only ever increment the
+    // opponent's slot during our turn, but snapshotting both costs 2
+    // bytes and avoids a side-dependent restore path).
+    std::uint8_t prev_checks[NUM_COLORS] = {0, 0};
 };
 
 // Side index within castling_rook_file: KINGSIDE first (kingside castle
@@ -67,6 +72,16 @@ struct Position {
     // Set by UCI_Variant; preserved across set_from_fen for the same
     // reason is_chess960 is (the UCI option is engine-persistent).
     RuleVariant rules        = RV_STANDARD;
+    // Three-check: number of checks delivered to each color so far.
+    // When `checks_delivered[c] >= 3`, color c has been checked three
+    // times and that color's opponent wins. Only consulted when
+    // `rules == RV_THREE_CHECK`; initialized to {0, 0} and incremented
+    // in make_move's post-move check-detection step. Snapshotted in
+    // UndoInfo so unmake restores. Lichess FEN encoding appends a
+    // `+<remaining-white>+<remaining-black>` field (remaining = 3 -
+    // delivered); set_from_fen parses it and to_fen emits it when
+    // the variant is active.
+    std::uint8_t checks_delivered[NUM_COLORS] = {0, 0};
     uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
     // Pawn-only Zobrist: XOR of PIECE_SQ[color][PAWN][sq] over all pawns.
     // Keys the pawn hash table in eval.cpp so pawn-structure terms
