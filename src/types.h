@@ -64,6 +64,7 @@ enum RuleVariant : std::uint8_t {
     RV_STANDARD    = 0,
     RV_KOTH        = 1,
     RV_THREE_CHECK = 2,
+    RV_HORDE       = 3,
 };
 
 enum MoveType : std::uint8_t {

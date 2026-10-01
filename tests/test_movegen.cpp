@@ -331,3 +331,52 @@ TEST_CASE("legality: stalemate produces zero legal moves and is NOT checkmate") 
     generate_moves(pos, moves);
     CHECK(moves.empty());
 }
+
+
+TEST_CASE("Horde: white (no king) has pseudo-legal moves generated without a king-safety filter") {
+    Position pos;
+    pos.rules = RV_HORDE;
+    // Simple Horde-shaped position: white has one pawn, no king; black has a standard king.
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/P7/8 w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    // White should at least have the single-push a2a3 and the Horde
+    // double-push a2a4 (but ONLY if we are rank-1 pawns; here pawn is
+    // on rank 2 which standard chess already allows). Both single
+    // and double push should be generated.
+    bool has_a3 = false;
+    bool has_a4 = false;
+    for (Move m : moves) {
+        if (move_from(m) == A2 && move_to(m) == A3) has_a3 = true;
+        if (move_from(m) == A2 && move_to(m) == A4) has_a4 = true;
+    }
+    CHECK(has_a3);
+    CHECK(has_a4);
+}
+
+TEST_CASE("Horde: rank-1 pawn can double-push to rank 3") {
+    Position pos;
+    pos.rules = RV_HORDE;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/P3K3 w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    bool has_a3 = false;
+    bool has_a2 = false;
+    for (Move m : moves) {
+        if (move_from(m) == A1 && move_to(m) == A3) has_a3 = true;
+        if (move_from(m) == A1 && move_to(m) == A2) has_a2 = true;
+    }
+    CHECK(has_a2);
+    CHECK(has_a3);  // Horde-specific double-push from rank 1
+}
+
+TEST_CASE("Horde: rank-1 pawn CANNOT double-push to rank 3 under standard rules") {
+    Position pos;
+    pos.rules = RV_STANDARD;  // explicit
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/P3K3 w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    for (Move m : moves) {
+        CHECK_FALSE((move_from(m) == A1 && move_to(m) == A3));
+    }
+}

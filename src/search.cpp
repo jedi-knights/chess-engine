@@ -553,6 +553,21 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         }
     }
 
+    // Horde: the pawn side (WHITE) loses the moment it has no pieces
+    // left. The piece side (BLACK) loses by standard checkmate OR by
+    // standard stalemate (both become -MATE_SCORE+ply from the stale-
+    // mated side's negamax below; the no-pieces check must fire here
+    // at the top for WHITE because WHITE can "run out" without the
+    // movegen-empty branch triggering -- e.g. zero pawns, zero empty
+    // moves generated, same thing). Only trips the WHITE branch; the
+    // "no moves at all" case covers BLACK via the standard branch
+    // further down.
+    if (pos.rules == RV_HORDE) {
+        if (pos.side_to_move == WHITE && pos.colors[WHITE] == 0) {
+            return -MATE_SCORE + ply;
+        }
+    }
+
     // Check extension: when the side to move is in check, tactical lines
     // are often deeper than the requested depth. Extend by one ply so
     // mate combinations don't fall off the horizon. Computed once here
@@ -688,6 +703,11 @@ int negamax(Position& pos, int depth, int alpha, int beta,
 
     if (moves.empty()) {
         if (node_in_check) {
+            return -MATE_SCORE + ply;
+        }
+        // Horde: stalemate = loss for the stalemated side (both colors).
+        // Standard chess returns 0 (draw); the two rules diverge here.
+        if (pos.rules == RV_HORDE) {
             return -MATE_SCORE + ply;
         }
         return 0;   // stalemate
