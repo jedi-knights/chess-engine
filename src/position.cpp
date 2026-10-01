@@ -454,9 +454,18 @@ void Position::remove_piece(Square s) {
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) — make_move handles normal, capture, en-passant, castling, and promotion in one fused function so the incremental Zobrist + PSQ updates stay in one place; splitting duplicates the piece-swap boilerplate 4x.
 void Position::make_move(Move m, UndoInfo& u) {
+    const MoveType mt = move_type(m);
+    // Crazyhouse drop: delegate to the drop-specific path. The 32-bit
+    // Move encoding packs the piece type into bits 17-19; from field
+    // is unused. make_drop/unmake_drop maintain hand counts and
+    // Zobrist/history consistency; the search transparently sees
+    // drops as regular Moves.
+    if (mt == MT_DROP) {
+        make_drop(move_drop_piece_type(m), move_to(m), u);
+        return;
+    }
     const Square   from   = move_from(m);
     const Square   to     = move_to(m);
-    const MoveType mt     = move_type(m);
     const Piece    moving = board[from];
     const Color    us     = side_to_move;
     const Color    them   = Color(us ^ 1);
@@ -666,9 +675,13 @@ void Position::make_move(Move m, UndoInfo& u) {
 }
 
 void Position::unmake_move(Move m, const UndoInfo& u) {
+    const MoveType mt = move_type(m);
+    if (mt == MT_DROP) {
+        unmake_drop(move_drop_piece_type(m), move_to(m), u);
+        return;
+    }
     const Square   from = move_from(m);
     const Square   to   = move_to(m);
-    const MoveType mt   = move_type(m);
     const Color    us   = Color(side_to_move ^ 1);   // the mover, before flip
 
     side_to_move = us;

@@ -6,6 +6,18 @@ std::string move_to_uci(Move m) {
     if (m == NULL_MOVE) {
         return "0000";
     }
+    // Crazyhouse drop: "P@f3". The 32-bit Move encoding packs the
+    // piece type in bits 17-19; from field is unused.
+    if (move_type(m) == MT_DROP) {
+        PieceType pt = move_drop_piece_type(m);
+        Square to = move_to(m);
+        std::string s;
+        s += "?PNBRQK"[pt];
+        s += '@';
+        s += char('a' + file_of(to));
+        s += char('1' + rank_of(to));
+        return s;
+    }
     Square from = move_from(m);
     Square to   = move_to(m);
     std::string s;
@@ -20,6 +32,26 @@ std::string move_to_uci(Move m) {
 }
 
 Move parse_uci_move(const Position& pos, const std::string& uci) {
+    // Crazyhouse drop notation: "P@f3", "N@e5", etc. Length 4, '@'
+    // at index 1. We accept this for ANY variant (if the engine is
+    // not Crazyhouse, the move will fail isLegal). The piece is
+    // uppercase by Lichess convention and belongs to the side-to-move.
+    if (uci.size() == 4 && uci[1] == '@') {
+        PieceType pt = NO_PIECE_TYPE;
+        switch (uci[0]) {
+            case 'P': pt = PAWN;   break;
+            case 'N': pt = KNIGHT; break;
+            case 'B': pt = BISHOP; break;
+            case 'R': pt = ROOK;   break;
+            case 'Q': pt = QUEEN;  break;
+            default: return NULL_MOVE;
+        }
+        int tf = uci[2] - 'a';
+        int tr = uci[3] - '1';
+        if (tf < 0 || tf > 7 || tr < 0 || tr > 7) return NULL_MOVE;
+        return make_drop_move(make_square(File(tf), Rank(tr)), pt);
+    }
+
     if (uci.size() < 4 || uci.size() > 5) {
         return NULL_MOVE;
     }

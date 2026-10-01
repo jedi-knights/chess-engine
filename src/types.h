@@ -46,12 +46,16 @@ constexpr Square make_square(File f, Rank r) { return Square((r << 3) | f); }
 constexpr Color     color_of(Piece p) { return (p < B_PAWN) ? WHITE : BLACK; }
 constexpr PieceType type_of (Piece p) { return PieceType(p < B_PAWN ? p : p - 8); }
 
-// Move encoding: 16 bits.
-//   bits 0-5   : from square    (0-63)
-//   bits 6-11  : to square      (0-63)
-//   bits 12-13 : promotion type (0=N, 1=B, 2=R, 3=Q)
-//   bits 14-15 : move type      (0=normal, 1=promotion, 2=en passant, 3=castling)
-using Move = uint16_t;
+// Move encoding: 32 bits (was 16; expanded for Crazyhouse drops which
+// need to encode "which piece type to drop" alongside the destination,
+// and the 16-bit layout had no spare bits).
+//   bits 0-5   : from square     (0-63)         — unused for MT_DROP
+//   bits 6-11  : to square       (0-63)
+//   bits 12-13 : promotion type  (0=N, 1=B, 2=R, 3=Q) — only for MT_PROMOTION
+//   bits 14-16 : move type       (3 bits; see MoveType)
+//   bits 17-19 : drop piece type (1=PAWN..5=QUEEN) — only for MT_DROP
+//   bits 20-31 : unused (reserved)
+using Move = uint32_t;
 
 // Rule-level variants (as opposed to Chess960, which is a FEN-level
 // variant that doesn't change win conditions). Each entry here adjusts
@@ -76,6 +80,10 @@ enum MoveType : std::uint8_t {
     MT_PROMOTION  = 1,
     MT_EN_PASSANT = 2,
     MT_CASTLING   = 3,
+    // Crazyhouse: drop a piece from hand onto an empty square.
+    // from field is unused; to holds the destination; drop piece
+    // type lives in bits 17-19 (see `move_drop_piece_type`).
+    MT_DROP       = 4,
 };
 
 constexpr Move make_move(Square from, Square to,
@@ -83,10 +91,20 @@ constexpr Move make_move(Square from, Square to,
     return Move(from | (to << 6) | ((promo - KNIGHT) << 12) | (mt << 14));
 }
 
+// Crazyhouse-specific constructor: builds an MT_DROP Move. `from` is
+// deliberately 0 (unused for drops); `pt` is the piece type to drop
+// (PAWN..QUEEN). KING cannot be in hand.
+constexpr Move make_drop_move(Square to, PieceType pt) {
+    return Move((to << 6) | (MT_DROP << 14) | (pt << 17));
+}
+
 constexpr Square    move_from(Move m)      { return Square(m & 63); }
 constexpr Square    move_to(Move m)        { return Square((m >> 6) & 63); }
-constexpr MoveType  move_type(Move m)      { return MoveType((m >> 14) & 3); }
+constexpr MoveType  move_type(Move m)      { return MoveType((m >> 14) & 7); }
 constexpr PieceType move_promotion(Move m) { return PieceType(((m >> 12) & 3) + KNIGHT); }
+// Only meaningful when move_type(m) == MT_DROP; returns NO_PIECE_TYPE
+// for other move types (the bits happen to be 0 there).
+constexpr PieceType move_drop_piece_type(Move m) { return PieceType((m >> 17) & 7); }
 
 constexpr Move NULL_MOVE = 0;
 

@@ -402,6 +402,29 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
         generate_castling(pos, moves);
     }
 
+    // Crazyhouse: generate drop moves for every piece in hand onto
+    // every empty square. Pawns can't drop on rank 1 or rank 8.
+    // Drops don't count as captures, so they're skipped in captures_only
+    // (qsearch) -- same policy as pushes.
+    if (!captures_only && pos.rules == RV_CRAZYHOUSE) {
+        Bitboard empty = ~pos.occupied;
+        for (int pt = PAWN; pt <= QUEEN; ++pt) {
+            if (pos.hand[us][pt] == 0) continue;
+            Bitboard targets = empty;
+            if (pt == PAWN) {
+                // Pawns can't drop on ranks 1 or 8 (promotion ranks).
+                constexpr Bitboard RANK_1_BB_ = 0x00000000000000FFULL;
+                constexpr Bitboard RANK_8_BB_ = 0xFF00000000000000ULL;
+                targets &= ~(RANK_1_BB_ | RANK_8_BB_);
+            }
+            Bitboard it = targets;
+            while (it != 0U) {
+                Square sq = pop_lsb(it);
+                moves.push_back(make_drop_move(sq, PieceType(pt)));
+            }
+        }
+    }
+
     // Legality filter with fast shortcuts. Classical make/unmake+attack
     // scan is ~100 ns per move; we only need it for moves that could
     // actually leave our king in check:
@@ -437,6 +460,18 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
                            [&](Move m) {
                                if (move_type(m) == MT_CASTLING) {
                                    return false;
+                               }
+                               // Drops: `from` field is 0 (unused) and doesn't
+                               // reflect any actual piece movement. The
+                               // standard-king-move shortcut below would
+                               // misinterpret from==A1 as a king move. Fall
+                               // through to the full is_legal probe when
+                               // we're in check (drops can block / absorb);
+                               // otherwise drops onto empty squares are
+                               // always safe for our own king (they add a
+                               // defender, never create a self-check).
+                               if (move_type(m) == MT_DROP) {
+                                   return in_check_now && !is_legal(pos, m);
                                }
                                Square from = move_from(m);
                                Square to   = move_to(m);
