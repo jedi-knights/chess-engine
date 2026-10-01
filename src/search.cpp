@@ -568,6 +568,20 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         }
     }
 
+    // Racing Kings: first king to reach rank 8 wins. The simple
+    // implementation ignores the "both reach rank 8 on consecutive
+    // plies = draw" rule for now (noted as a tuning follow-up); the
+    // common case is a race where one side gets there first. From
+    // our perspective, if the OPPONENT'S king is on rank 8, they
+    // just raced there and we lost.
+    if (pos.rules == RV_RACING_KINGS) {
+        constexpr Bitboard RANK_8_BB = 0xFF00000000000000ULL;
+        Color them = Color(pos.side_to_move ^ 1);
+        if ((pos.pieces[them][KING] & RANK_8_BB) != 0U) {
+            return -MATE_SCORE + ply;
+        }
+    }
+
     // Check extension: when the side to move is in check, tactical lines
     // are often deeper than the requested depth. Extend by one ply so
     // mate combinations don't fall off the horizon. Computed once here
