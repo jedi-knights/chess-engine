@@ -128,6 +128,8 @@ void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
             pos.rules = RV_KOTH;
         } else if (value == "threeCheck" || value == "threecheck" || value == "3check") {
             pos.rules = RV_THREE_CHECK;
+        } else if (value == "horde") {
+            pos.rules = RV_HORDE;
         } else {
             pos.rules = RV_STANDARD;
         }

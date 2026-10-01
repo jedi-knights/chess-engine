@@ -15,6 +15,9 @@ constexpr Bitboard RANK_3_BB = 0x0000000000FF0000ULL;
 constexpr Bitboard RANK_6_BB = 0x0000FF0000000000ULL;
 constexpr Bitboard RANK_1_BB = 0x00000000000000FFULL;
 constexpr Bitboard RANK_8_BB = 0xFF00000000000000ULL;
+// Horde: pawns can start on rank 1; added so the double-push rule can
+// detect source-rank-1 pawns (single-push target lands on rank 2).
+constexpr Bitboard RANK_2_BB = 0x000000000000FF00ULL;
 
 // Emit one normal/ep move OR four promotion moves (Q, R, B, N) when the
 // destination sits on the promotion rank.
@@ -43,6 +46,14 @@ void generate_pawn_moves(const Position& pos, MoveList& moves, bool captures_onl
     if (us == WHITE) {
         Bitboard single = (pawns << 8) & empty;
         Bitboard dbl    = ((single & RANK_3_BB) << 8) & empty;
+        // Horde: white pawns on rank 1 can double-push to rank 3. The
+        // standard rule above handles rank-2 pawns via `single & RANK_3_BB`
+        // (single-push target on rank 3 => source was rank 2). For
+        // rank-1 pawns, the single-push target is on rank 2; the
+        // double-push would land on rank 3 if that square is empty.
+        if (pos.rules == RV_HORDE) {
+            dbl |= ((single & RANK_2_BB) << 8) & empty;
+        }
         Bitboard cap_nw = ((pawns & ~FILE_A_BB) << 7) & enemy;
         Bitboard cap_ne = ((pawns & ~FILE_H_BB) << 9) & enemy;
 
