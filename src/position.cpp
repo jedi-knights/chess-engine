@@ -549,10 +549,13 @@ void Position::make_move(Move m, UndoInfo& u) {
         }
 
         // Move the piece; promotion changes type at the destination.
+        // MT_PROMOTION_KING is antichess-only and always targets KING.
         remove_piece(from);
         if (mt == MT_PROMOTION) {
             PieceType promo = move_promotion(m);
             put_piece(to, Piece(us == WHITE ? promo : promo + 8));
+        } else if (mt == MT_PROMOTION_KING) {
+            put_piece(to, Piece(us == WHITE ? W_KING : B_KING));
         } else {
             put_piece(to, moving);
         }
@@ -670,8 +673,13 @@ void Position::make_move(Move m, UndoInfo& u) {
     // Real games have exactly one king per side, but the standard perft
     // suite includes contrived positions with none — assert only the upper
     // bound to catch actual corruption (double-king) without rejecting them.
-    assert(popcount(pieces[WHITE][KING]) <= 1);
-    assert(popcount(pieces[BLACK][KING]) <= 1);
+    // Antichess allows multiple kings (pawns can promote to king, and
+    // kings are regular pieces that can be captured), so the assertion
+    // is skipped for that variant.
+    if (rules != RV_ANTICHESS) {
+        assert(popcount(pieces[WHITE][KING]) <= 1);
+        assert(popcount(pieces[BLACK][KING]) <= 1);
+    }
 }
 
 void Position::unmake_move(Move m, const UndoInfo& u) {
@@ -725,11 +733,11 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
                 }
             }
         }
-        // Undo the piece move. For promotion, restore a pawn at `from`
-        // rather than the promoted piece.
+        // Undo the piece move. For promotion (including king-promotion),
+        // restore a pawn at `from` rather than the promoted piece.
         Piece at_to = board[to];
         remove_piece(to);
-        if (mt == MT_PROMOTION) {
+        if (mt == MT_PROMOTION || mt == MT_PROMOTION_KING) {
             put_piece(from, Piece(us == WHITE ? W_PAWN : B_PAWN));
         } else {
             put_piece(from, at_to);

@@ -6,6 +6,7 @@
 #include "support.h"
 
 #include "movegen.h"
+#include "notation.h"
 #include "position.h"
 
 #include <string>
@@ -413,4 +414,63 @@ TEST_CASE("Racing Kings: queen check IS legal under standard rules (regression g
         if (move_from(m) == D4 && move_to(m) == D8) { has_d4_d8 = true; break; }
     }
     CHECK(has_d4_d8);  // standard chess allows giving check
+}
+
+
+TEST_CASE("Antichess: pawn on 7th rank generates king-promotion in addition to N/B/R/Q") {
+    Position pos;
+    pos.rules = RV_ANTICHESS;
+    REQUIRE(pos.set_from_fen("8/P7/8/8/8/8/8/4k3 w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    bool has_q = false, has_r = false, has_b = false, has_n = false, has_k = false;
+    for (Move m : moves) {
+        if (move_from(m) == A7 && move_to(m) == A8) {
+            if (move_type(m) == MT_PROMOTION) {
+                PieceType p = move_promotion(m);
+                if (p == QUEEN)  has_q = true;
+                if (p == ROOK)   has_r = true;
+                if (p == BISHOP) has_b = true;
+                if (p == KNIGHT) has_n = true;
+            } else if (move_type(m) == MT_PROMOTION_KING) {
+                has_k = true;
+            }
+        }
+    }
+    CHECK(has_q); CHECK(has_r); CHECK(has_b); CHECK(has_n); CHECK(has_k);
+}
+
+TEST_CASE("Standard chess: pawn on 7th rank does NOT generate king-promotion") {
+    Position pos;
+    pos.rules = RV_STANDARD;
+    REQUIRE(pos.set_from_fen("8/P7/8/8/8/8/8/4k3 w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    for (Move m : moves) {
+        CHECK(move_type(m) != MT_PROMOTION_KING);
+    }
+}
+
+TEST_CASE("Antichess: king-promotion make/unmake round-trips") {
+    Position pos;
+    pos.rules = RV_ANTICHESS;
+    REQUIRE(pos.set_from_fen("8/P7/8/8/8/8/8/4k3 w - - 0 1"));
+    std::string before = pos.to_fen();
+    Move m = make_move(A7, A8, MT_PROMOTION_KING);
+    UndoInfo u;
+    pos.make_move(m, u);
+    CHECK(pos.board[A8] == W_KING);  // promoted to king
+    CHECK(pos.board[A7] == NO_PIECE);
+    pos.unmake_move(m, u);
+    CHECK(pos.to_fen() == before);
+}
+
+TEST_CASE("parse_uci_move: a7a8k parses to MT_PROMOTION_KING") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("8/P7/8/8/8/8/8/4k3 w - - 0 1"));
+    Move m = parse_uci_move(pos, "a7a8k");
+    CHECK(move_type(m) == MT_PROMOTION_KING);
+    CHECK(move_from(m) == A7);
+    CHECK(move_to(m)   == A8);
+    CHECK(move_to_uci(m) == "a7a8k");
 }
