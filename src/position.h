@@ -27,6 +27,17 @@ struct UndoInfo {
     // opponent's slot during our turn, but snapshotting both costs 2
     // bytes and avoids a side-dependent restore path).
     std::uint8_t prev_checks[NUM_COLORS] = {0, 0};
+    // Atomic: on a capture, up to 8 adjacent squares explode (non-pawn
+    // pieces removed). Snapshot the Piece at every 3x3 square (centered
+    // on `to`, index 4) so unmake restores. Index layout:
+    //   0 1 2
+    //   3 4 5
+    //   6 7 8
+    // where 4 is the explosion center (= `to`). On non-captures or non-
+    // Atomic positions, all slots stay NO_PIECE.
+    Piece atomic_explode[9] = {NO_PIECE, NO_PIECE, NO_PIECE,
+                               NO_PIECE, NO_PIECE, NO_PIECE,
+                               NO_PIECE, NO_PIECE, NO_PIECE};
 };
 
 // Side index within castling_rook_file: KINGSIDE first (kingside castle

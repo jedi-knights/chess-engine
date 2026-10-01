@@ -489,6 +489,36 @@ void Position::make_move(Move m, UndoInfo& u) {
         } else {
             put_piece(to, moving);
         }
+
+        // Atomic: a capture explodes the 3x3 box centered on `to`. The
+        // moving piece (now on `to`) and every non-pawn piece in the 8
+        // adjacent squares are removed; pawns survive adjacent
+        // explosions (central captured pawn died via remove_piece
+        // above). For en passant, the explosion is still centered on
+        // `to` (the capturing pawn's landing square), NOT on the
+        // captured pawn's square -- matches Lichess/chessops rules.
+        if (rules == RV_ATOMIC && u.captured != NO_PIECE) {
+            int tr = int(rank_of(to));
+            int tf = int(file_of(to));
+            int idx = 0;
+            for (int dr = -1; dr <= 1; ++dr) {
+                for (int df = -1; df <= 1; ++df, ++idx) {
+                    int r = tr + dr, f = tf + df;
+                    if (r < 0 || r > 7 || f < 0 || f > 7) continue;
+                    Square s = make_square(File(f), Rank(r));
+                    Piece p = board[s];
+                    if (p == NO_PIECE) continue;
+                    // Center square (idx 4) is the moving piece's own
+                    // position after the capture; it always explodes.
+                    // Adjacent pawns survive; captured piece on the
+                    // center was already removed via remove_piece
+                    // (same slot in the ep case).
+                    if (idx != 4 && type_of(p) == PAWN) continue;
+                    u.atomic_explode[idx] = p;
+                    remove_piece(s);
+                }
+            }
+        }
     }
 
     // Castling-rights update: king move clears BOTH of own color's bits
@@ -586,6 +616,24 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
         put_piece(king_from, king_piece);
         put_piece(rook_from, rook_piece);
     } else {
+        // Atomic: restore the 3x3 explosion first, BEFORE the standard
+        // undo. Index 4 is the center (= `to`) which holds the moving
+        // piece (promoted form if MT_PROMOTION); the standard undo
+        // below then correctly removes it and puts back the pre-move
+        // piece at `from`.
+        if (rules == RV_ATOMIC && u.captured != NO_PIECE) {
+            int tr = int(rank_of(to));
+            int tf = int(file_of(to));
+            int idx = 0;
+            for (int dr = -1; dr <= 1; ++dr) {
+                for (int df = -1; df <= 1; ++df, ++idx) {
+                    if (u.atomic_explode[idx] == NO_PIECE) continue;
+                    int r = tr + dr, f = tf + df;
+                    Square s = make_square(File(f), Rank(r));
+                    put_piece(s, u.atomic_explode[idx]);
+                }
+            }
+        }
         // Undo the piece move. For promotion, restore a pawn at `from`
         // rather than the promoted piece.
         Piece at_to = board[to];
@@ -597,11 +645,18 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
         }
 
         // Restore captured piece (on the ep-target square for en passant).
+        // In Atomic, the central captured piece was restored by the
+        // explosion loop above (ep case: center = `to`, which is the
+        // capturer's landing square, not the pawn-captured square --
+        // the captured pawn's square is NOT in the 3x3, so we still
+        // need to restore it here). Guard against double-put.
         if (u.captured != NO_PIECE) {
             Square cap_sq = (mt == MT_EN_PASSANT)
                 ? Square(int(to) + (us == WHITE ? -8 : 8))
                 : to;
-            put_piece(cap_sq, u.captured);
+            if (board[cap_sq] == NO_PIECE) {
+                put_piece(cap_sq, u.captured);
+            }
         }
     }
 

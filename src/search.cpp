@@ -582,6 +582,16 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         }
     }
 
+    // Atomic: a king destroyed by explosion ends the game. The parent's
+    // last move exploded our king (via a 3x3-adjacent capture); from
+    // the current side_to_move's perspective, we lost. Catches both
+    // "opponent exploded our king" and "we somehow self-destructed."
+    if (pos.rules == RV_ATOMIC) {
+        if (pos.pieces[pos.side_to_move][KING] == 0U) {
+            return -MATE_SCORE + ply;
+        }
+    }
+
     // Check extension: when the side to move is in check, tactical lines
     // are often deeper than the requested depth. Extend by one ply so
     // mate combinations don't fall off the horizon. Computed once here

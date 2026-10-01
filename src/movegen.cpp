@@ -465,6 +465,44 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
                            }),
             moves.end());
     }
+
+    // Atomic: standard legality already dropped moves that leave OUR
+    // king in check, but Atomic over-counts and under-counts both:
+    //   - King captures: illegal (king can't self-destruct). Standard
+    //     filter allows them if the opp piece is undefended.
+    //   - Capture-explodes-opp-king moves: legal even if our king is
+    //     "in check" at move time (opp king dies first, we win).
+    // Second-pass make/unmake probe with Atomic-aware legality.
+    if (pos.rules == RV_ATOMIC) {
+        moves.erase(
+            std::remove_if(moves.begin(), moves.end(),
+                           [&](Move m) {
+                               Square mfrom = move_from(m);
+                               Square mto   = move_to(m);
+                               if (pos.board[mto] != NO_PIECE
+                                   && pos.board[mfrom] != NO_PIECE
+                                   && type_of(pos.board[mfrom]) == KING) {
+                                   return true;  // king capture illegal
+                               }
+                               UndoInfo u;
+                               pos.make_move(m, u);
+                               bool my_king_dead  = pos.pieces[us][KING] == 0U;
+                               bool opp_king_dead = pos.pieces[Color(us ^ 1)][KING] == 0U;
+                               bool our_king_in_check = false;
+                               if (!my_king_dead && !opp_king_dead) {
+                                   // Flip side_to_move to probe our king:
+                                   // in_check() reads pos.side_to_move.
+                                   pos.side_to_move = Color(pos.side_to_move ^ 1);
+                                   our_king_in_check = in_check(pos);
+                                   pos.side_to_move = Color(pos.side_to_move ^ 1);
+                               }
+                               pos.unmake_move(m, u);
+                               if (my_king_dead)  return true;  // suicidal
+                               if (opp_king_dead) return false; // we win
+                               return our_king_in_check;        // standard rule
+                           }),
+            moves.end());
+    }
 }
 
 void generate_moves(Position& pos, MoveList& moves) {
