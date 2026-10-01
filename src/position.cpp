@@ -57,6 +57,12 @@ void Position::clear() {
     castling_rook_file[BLACK][QUEENSIDE] = FILE_A;
     checks_delivered[WHITE] = 0;
     checks_delivered[BLACK] = 0;
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) {
+            hand[c][pt] = 0;
+        }
+    }
+    promoted = 0;
     // Deliberately NOT resetting `is_chess960` -- the UCI_Chess960 option
     // is engine-persistent across FEN loads, and set_from_fen only ever
     // upgrades it to true (never back to false). An explicit option
@@ -104,9 +110,31 @@ bool Position::set_from_fen(const std::string& fen) {
 
     int r = 7;
     int f = 0;
+    bool in_hand = false;  // Crazyhouse: `[...]` after rank 1 holds the hand.
     for (char c : placement) {
+        if (c == '[') { in_hand = true; continue; }
+        if (c == ']') { in_hand = false; continue; }
+        if (in_hand) {
+            // Crazyhouse hand characters -- uppercase for white hand,
+            // lowercase for black. `-` is empty-hand marker.
+            if (c == '-') continue;
+            Piece p = piece_from_char(c);
+            if (p == NO_PIECE || type_of(p) == KING) continue;
+            Color col = color_of(p);
+            ++hand[col][type_of(p)];
+            continue;
+        }
         if (c == '/') { --r; f = 0; }
         else if (std::isdigit(static_cast<unsigned char>(c)) != 0) { f += c - '0'; }
+        else if (c == '~') {
+            // Crazyhouse X-FEN marker: previous piece is a promoted
+            // pawn. The piece itself was already placed on the prior
+            // iteration (f advanced); mark the square it's on.
+            if (f > 0 && r >= 0) {
+                Square s = make_square(File(f - 1), Rank(r));
+                promoted |= square_bb(s);
+            }
+        }
         else {
             Piece p = piece_from_char(c);
             if (p == NO_PIECE || r < 0 || f > 7) {
@@ -247,6 +275,22 @@ std::string Position::to_fen() const {
         if (r > 0) {
             o << '/';
         }
+    }
+    // Crazyhouse: emit `[<hand>]` after the rank-1 piece placement.
+    // Hand pieces as uppercase (white) / lowercase (black). Empty hand
+    // emits `[]`. Only when the variant is active -- standard chess
+    // FEN round-trip stays byte-identical.
+    if (rules == RV_CRAZYHOUSE) {
+        o << '[';
+        for (int c = 0; c < NUM_COLORS; ++c) {
+            for (int pt = QUEEN; pt >= PAWN; --pt) {
+                for (int i = 0; i < hand[c][pt]; ++i) {
+                    Piece p = Piece(c == WHITE ? pt : pt + 8);
+                    o << char_from_piece(p);
+                }
+            }
+        }
+        o << ']';
     }
     o << ' ' << (side_to_move == WHITE ? 'w' : 'b') << ' ';
     if (castling == NO_CASTLING) {
@@ -473,6 +517,20 @@ void Position::make_move(Move m, UndoInfo& u) {
         put_piece(king_to, king_piece);
         put_piece(rook_to, rook_piece);
     } else {
+        // Crazyhouse: before removing the captured piece, record what
+        // type goes to our hand. Promoted pieces come back as pawns.
+        if (rules == RV_CRAZYHOUSE && u.captured != NO_PIECE) {
+            Square cap_sq = (mt == MT_EN_PASSANT)
+                ? Square(int(to) + (us == WHITE ? -8 : 8))
+                : to;
+            PieceType cap_pt = type_of(u.captured);
+            if ((promoted & square_bb(cap_sq)) != 0U) {
+                cap_pt = PAWN;
+                promoted &= ~square_bb(cap_sq);
+            }
+            u.ch_captured_as = cap_pt;
+            ++hand[us][cap_pt];
+        }
         // Remove captured piece first (en passant captures off-square).
         if (u.captured != NO_PIECE) {
             Square cap_sq = (mt == MT_EN_PASSANT)
@@ -488,6 +546,26 @@ void Position::make_move(Move m, UndoInfo& u) {
             put_piece(to, Piece(us == WHITE ? promo : promo + 8));
         } else {
             put_piece(to, moving);
+        }
+        // Crazyhouse: maintain the `promoted` bitboard across moves.
+        // Snapshot bits at from/to for unmake, then update:
+        //   - MT_PROMOTION: destination becomes a promoted piece.
+        //   - Normal move of a promoted piece: bit shifts from->to.
+        //   - Any move clears the from bit (whether promoted or not).
+        if (rules == RV_CRAZYHOUSE) {
+            u.prev_promoted_at_from = (promoted & square_bb(from)) != 0U;
+            u.prev_promoted_at_to   = (promoted & square_bb(to))   != 0U;
+            if (mt == MT_PROMOTION) {
+                promoted |=  square_bb(to);
+                promoted &= ~square_bb(from);
+            } else if (u.prev_promoted_at_from) {
+                promoted &= ~square_bb(from);
+                promoted |=  square_bb(to);
+            } else {
+                // Regular move of a non-promoted piece: just make sure
+                // `to` isn't flagged (shouldn't be, but defensive).
+                promoted &= ~square_bb(to);
+            }
         }
 
         // Atomic: a capture explodes the 3x3 box centered on `to`. The
@@ -657,6 +735,24 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
             if (board[cap_sq] == NO_PIECE) {
                 put_piece(cap_sq, u.captured);
             }
+            // Crazyhouse: reverse the hand-transfer bookkeeping done
+            // in make_move. The `promoted` bit on cap_sq is restored
+            // by the `promoted` snapshot block below.
+            if (rules == RV_CRAZYHOUSE && u.ch_captured_as != NO_PIECE_TYPE) {
+                --hand[us][u.ch_captured_as];
+            }
+        }
+        // Crazyhouse: restore the `promoted` bitboard around from/to.
+        // The hand-transfer path above (`u.ch_captured_as`) already
+        // reversed the hand count; the captured-piece's promoted-bit
+        // restoration is implicit via the from/to snapshot: cap_sq
+        // == to for non-ep captures, and in ep the captured pawn
+        // can't have been "promoted" since it's a pawn.
+        if (rules == RV_CRAZYHOUSE) {
+            if (u.prev_promoted_at_from) promoted |=  square_bb(from);
+            else                         promoted &= ~square_bb(from);
+            if (u.prev_promoted_at_to)   promoted |=  square_bb(to);
+            else                         promoted &= ~square_bb(to);
         }
     }
 
@@ -708,4 +804,80 @@ std::string Position::pretty() const {
     o << "    a   b   c   d   e   f   g   h\n"
       << "FEN: " << to_fen() << '\n';
     return o.str();
+}
+
+
+// Crazyhouse: place a piece from hand onto an empty square.
+void Position::make_drop(PieceType pt, Square to, UndoInfo& u) {
+    assert(rules == RV_CRAZYHOUSE);
+    assert(board[to] == NO_PIECE);
+    assert(hand[side_to_move][pt] > 0);
+    const Color us   = side_to_move;
+    const Color them = Color(us ^ 1);
+
+    u.castling       = castling;
+    u.ep_square      = ep_square;
+    u.halfmove_clock = halfmove_clock;
+    u.key            = key;
+    u.pawn_key       = pawn_key;
+    u.prev_checks[WHITE] = checks_delivered[WHITE];
+    u.prev_checks[BLACK] = checks_delivered[BLACK];
+    u.captured       = NO_PIECE;
+    u.ch_captured_as = NO_PIECE_TYPE;
+
+    key ^= zobrist::CASTLING[castling & 15];
+    if (zobrist::ep_is_capturable(*this)) {
+        key ^= zobrist::EP_FILE[file_of(ep_square)];
+    }
+
+    put_piece(to, Piece(us == WHITE ? pt : pt + 8));
+    --hand[us][pt];
+
+    // Drops never set en passant and never reset the castling-rights
+    // mask (no king/rook ever moves). Halfmove clock DOES advance
+    // (drops are not captures and not pawn moves even if dropping a
+    // pawn -- Lichess treats drops as resetting the halfmove clock
+    // only when a pawn drop makes a 3-fold check irrelevant; standard
+    // crazyhouse-FEN tooling resets halfmove on drops too). Keep
+    // halfmove-reset for correctness.
+    halfmove_clock = 0;
+    ep_square      = NO_SQUARE;
+
+    // Three-check accounting: a drop can give check.
+    if (rules == RV_THREE_CHECK) {
+        // Not reachable (rules == RV_CRAZYHOUSE); guard retained for
+        // future compound-variant support.
+    }
+
+    if (us == BLACK) ++fullmove_number;
+    side_to_move = them;
+
+    key ^= zobrist::CASTLING[castling & 15];
+    if (zobrist::ep_is_capturable(*this)) {
+        key ^= zobrist::EP_FILE[file_of(ep_square)];
+    }
+    key ^= zobrist::SIDE;
+
+    assert(history_size < HISTORY_CAPACITY);
+    if (history_size < HISTORY_CAPACITY) {
+        history[history_size++] = key;
+    }
+}
+
+void Position::unmake_drop(PieceType pt, Square to, const UndoInfo& u) {
+    const Color us = Color(side_to_move ^ 1);
+    side_to_move = us;
+    if (us == BLACK) --fullmove_number;
+
+    remove_piece(to);
+    ++hand[us][pt];
+
+    ep_square      = u.ep_square;
+    castling       = u.castling;
+    halfmove_clock = u.halfmove_clock;
+    checks_delivered[WHITE] = u.prev_checks[WHITE];
+    checks_delivered[BLACK] = u.prev_checks[BLACK];
+    key            = u.key;
+    pawn_key       = u.pawn_key;
+    if (history_size > 0) --history_size;
 }

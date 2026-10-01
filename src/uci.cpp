@@ -136,6 +136,8 @@ void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
             pos.rules = RV_ATOMIC;
         } else if (value == "antichess") {
             pos.rules = RV_ANTICHESS;
+        } else if (value == "crazyhouse") {
+            pos.rules = RV_CRAZYHOUSE;
         } else {
             pos.rules = RV_STANDARD;
         }
@@ -179,6 +181,35 @@ void cmd_position(std::istringstream& is, Position& pos, std::ostream& out) {
         return;
     }
     while (is >> token) {
+        // Crazyhouse drop notation: "P@f3", "N@e5", etc. Length 4,
+        // '@' at index 1, piece-type char at [0], square at [2..3].
+        // Only applied when the variant is active and the from-piece
+        // and destination parse cleanly. The engine's own search
+        // doesn't generate drops (see position.cpp's make_drop doc),
+        // so we never emit them -- but we must accept them when the
+        // opponent plays one and the GUI replays the game state.
+        if (pos.rules == RV_CRAZYHOUSE && token.size() == 4 && token[1] == '@') {
+            Piece p = NO_PIECE;
+            switch (token[0]) {
+                case 'P': p = W_PAWN;   break;
+                case 'N': p = W_KNIGHT; break;
+                case 'B': p = W_BISHOP; break;
+                case 'R': p = W_ROOK;   break;
+                case 'Q': p = W_QUEEN;  break;
+                default: return;
+            }
+            int to_file = token[2] - 'a';
+            int to_rank = token[3] - '1';
+            if (to_file < 0 || to_file > 7 || to_rank < 0 || to_rank > 7) return;
+            Square to = make_square(File(to_file), Rank(to_rank));
+            PieceType pt = type_of(p);
+            if (pos.board[to] != NO_PIECE) return;
+            if (pos.hand[pos.side_to_move][pt] == 0) return;
+            UndoInfo u;
+            pos.make_drop(pt, to, u);
+            continue;
+        }
+
         Move m = parse_uci_move(pos, token);
         if (m == NULL_MOVE) {
             return;

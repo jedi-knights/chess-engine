@@ -38,6 +38,15 @@ struct UndoInfo {
     Piece atomic_explode[9] = {NO_PIECE, NO_PIECE, NO_PIECE,
                                NO_PIECE, NO_PIECE, NO_PIECE,
                                NO_PIECE, NO_PIECE, NO_PIECE};
+    // Crazyhouse: did this move give its captured piece to our hand
+    // (and if so, as what piece type -- promoted-piece captures come
+    // back as PAWNs). NO_PIECE_TYPE if no hand transfer happened.
+    PieceType ch_captured_as = NO_PIECE_TYPE;
+    // Crazyhouse: did `promoted` have the `to` bit set before this
+    // move? Needed on unmake to restore it after a non-promotion
+    // move of a promoted piece shifts the bit.
+    bool prev_promoted_at_to   = false;
+    bool prev_promoted_at_from = false;
 };
 
 // Side index within castling_rook_file: KINGSIDE first (kingside castle
@@ -93,6 +102,19 @@ struct Position {
     // delivered); set_from_fen parses it and to_fen emits it when
     // the variant is active.
     std::uint8_t checks_delivered[NUM_COLORS] = {0, 0};
+    // Crazyhouse: pieces each side has captured and holds "in hand"
+    // for later drop. Index 0 is unused (NO_PIECE_TYPE / sentinel);
+    // valid indices 1..5 correspond to PAWN, KNIGHT, BISHOP, ROOK,
+    // QUEEN. KING is never in hand (can't be captured). Only consulted
+    // when `rules == RV_CRAZYHOUSE`.
+    std::uint8_t hand[NUM_COLORS][NUM_PIECE_TYPES] = {{0}, {0}};
+    // Crazyhouse: bitboard of squares holding a piece that was once a
+    // pawn promoted to its current type. When captured, these come
+    // back to the opponent's hand as PAWNs (not as the promoted type).
+    // Maintained by make_move (promotion sets the bit on `to`;
+    // non-promotion move clears/sets as the piece moves). Only
+    // consulted when `rules == RV_CRAZYHOUSE`.
+    Bitboard promoted = 0;
     uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
     // Pawn-only Zobrist: XOR of PIECE_SQ[color][PAWN][sq] over all pawns.
     // Keys the pawn hash table in eval.cpp so pawn-structure terms
@@ -148,6 +170,15 @@ struct Position {
     // generated the move.
     void make_move(Move m, UndoInfo& u);
     void unmake_move(Move m, const UndoInfo& u);
+
+    // Crazyhouse-only: drop a piece from hand onto an empty square.
+    // Does NOT go through the normal Move encoding -- the 16-bit Move
+    // doesn't have room for "which piece type to drop" alongside
+    // from/to. Callers (uci.cpp's parse of "P@f3") invoke this
+    // directly. The engine's own movegen does NOT generate drops yet
+    // -- it plays Crazyhouse without using its hand. See CLAUDE.md.
+    void make_drop(PieceType pt, Square to, UndoInfo& u);
+    void unmake_drop(PieceType pt, Square to, const UndoInfo& u);
 
     // Rebuild psq_mg[] / psq_eg[] from scratch by summing over every
     // piece on the board. Called by set_from_fen (which sets bitboards
