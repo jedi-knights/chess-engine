@@ -68,6 +68,7 @@ enum RuleVariant : std::uint8_t {
     RV_RACING_KINGS = 4,
     RV_ATOMIC       = 5,
     RV_ANTICHESS    = 6,
+    RV_CRAZYHOUSE   = 7,
 };
 
 enum MoveType : std::uint8_t {
