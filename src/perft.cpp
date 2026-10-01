@@ -45,6 +45,19 @@ static const PerftEntry SUITE[] = {
     {"Position 6",
      "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
      {1, 46, 2079, 89890, 3894594, 164075551, 0}},
+    // Chess960 perft positions. Rook starting files vary; FEN uses
+    // Shredder-FEN castling encoding (file letters, not KQkq). Expected
+    // node counts cross-verified against chessops' independent FRC
+    // movegen -- if the two engines disagree, one of them has a bug.
+    {"FRC 1 (RBQNBKRN)",
+     "rbqnbkrn/pppppppp/8/8/8/8/PPPPPPPP/RBQNBKRN w GAga - 0 1",
+     {1, 20, 400, 8976, 200493, 4968908, 0}},
+    {"FRC 2 (RBBQNNKR)",
+     "rbbqnnkr/pppppppp/8/8/8/8/PPPPPPPP/RBBQNNKR w HAha - 0 1",
+     {1, 20, 400, 9072, 204305, 5116256, 0}},
+    {"FRC 3 (NRKBNQBR)",
+     "nrkbnqbr/pppppppp/8/8/8/8/PPPPPPPP/NRKBNQBR w HBhb - 0 1",
+     {1, 19, 361, 7805, 167933, 4054729, 0}},
 };
 
 bool run_perft_suite(int max_depth, std::ostream& out) {

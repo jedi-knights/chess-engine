@@ -103,13 +103,13 @@ TEST_CASE("run_perft_suite: depth 1 all positions pass and print expected shape"
     CHECK(ok);
 
     const std::string s = out.str();
-    // Every one of the 6 standard-suite entries should appear in a
-    // header line. The suite renders "=== <name> ===" per position, so
-    // "===" appears 2 times per position = 12 total.
+    // Every suite entry should appear in a header line. The suite
+    // renders "=== <name> ===" per position, so "===" appears 2 times
+    // per position. 6 standard + 3 FRC = 9 total * 2 = 18.
     int trip_count = 0;
     size_t pos = 0;
     while ((pos = s.find("===", pos)) != std::string::npos) { ++trip_count; ++pos; }
-    CHECK(trip_count == 12);
+    CHECK(trip_count == 18);
 
     // Depth-1 counts all pass with our current legality-correct movegen,
     // so no [FAIL] lines and at least one [OK  ] line.

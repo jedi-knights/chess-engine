@@ -255,3 +255,77 @@ TEST_CASE("recompute_psq: rebuilds accumulators from bitboards") {
         CHECK(pos.psq_eg[BLACK] == eg_b);
     }
 }
+
+
+TEST_CASE("Chess960: Shredder-FEN parses to the right rook files and infers is_chess960") {
+    Position pos;
+    // Rooks on B1/F1 (both colors mirror). King on C1/C8. Shredder-FEN
+    // castling-rights letters "BFbf".
+    REQUIRE(pos.set_from_fen("nrkbnqbr/pppppppp/8/8/8/8/PPPPPPPP/NRKBNQBR w HBhb - 0 1"));
+    // Shredder letters give direct file resolution.
+    CHECK(pos.castling_rook_file[WHITE][KINGSIDE]  == FILE_H);
+    CHECK(pos.castling_rook_file[WHITE][QUEENSIDE] == FILE_B);
+    CHECK(pos.castling_rook_file[BLACK][KINGSIDE]  == FILE_H);
+    CHECK(pos.castling_rook_file[BLACK][QUEENSIDE] == FILE_B);
+    CHECK(pos.is_chess960);  // king not on E file
+    CHECK((pos.castling & WHITE_OO)  != 0);
+    CHECK((pos.castling & WHITE_OOO) != 0);
+}
+
+TEST_CASE("Chess960: FEN round-trip preserves non-classical rook files via X-FEN output") {
+    const char* fen = "nrkbnqbr/pppppppp/8/8/8/8/PPPPPPPP/NRKBNQBR w HBhb - 0 1";
+    Position pos;
+    REQUIRE(pos.set_from_fen(fen));
+    // X-FEN emission: rook on B is the outermost queenside rook (only
+    // one on that side); it is on A? No, on B. But since is_chess960
+    // was inferred, we emit file letters unconditionally.
+    std::string out = pos.to_fen();
+    // Allow either HBhb (file letters, since is_chess960) OR a
+    // chessops-compatible encoding -- what matters is parsing it back
+    // reconstructs the same castling_rook_file.
+    Position round;
+    REQUIRE(round.set_from_fen(out));
+    CHECK(round.castling_rook_file[WHITE][KINGSIDE]  == FILE_H);
+    CHECK(round.castling_rook_file[WHITE][QUEENSIDE] == FILE_B);
+    CHECK(round.is_chess960);
+}
+
+TEST_CASE("Chess960: KQkq fallback resolves to outermost rooks of each color") {
+    // Position where the kings and rooks are in classical squares BUT
+    // the FEN uses the X-FEN "KQkq" form -- the parser should resolve
+    // these to A/H files just like classical chess.
+    Position pos;
+    REQUIRE(pos.set_from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"));
+    CHECK(pos.castling_rook_file[WHITE][KINGSIDE]  == FILE_H);
+    CHECK(pos.castling_rook_file[WHITE][QUEENSIDE] == FILE_A);
+    CHECK(pos.castling_rook_file[BLACK][KINGSIDE]  == FILE_H);
+    CHECK(pos.castling_rook_file[BLACK][QUEENSIDE] == FILE_A);
+    CHECK(!pos.is_chess960);  // classical layout, no inference trigger
+}
+
+TEST_CASE("Chess960: FRC castle make/unmake round-trips") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("nrkbnqbr/pppppppp/8/8/8/8/PPPPPPPP/NRKBNQBR w HBhb - 0 1"));
+    // Set up a legal kingside castle for white: clear the pieces between
+    // king on C1 and the kingside destination G1 so the castle fires.
+    // We will directly test make/unmake on a position where the castle
+    // IS legal. Use a hand-crafted FEN.
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/8/8/8/2K4R w H - 0 1"));
+    CHECK(pos.is_chess960);
+    // White has only kingside castling right (rook on H1, king on C1).
+    // Internal encoding: from=C1, to=G1.
+    Move castle = make_move(C1, G1, MT_CASTLING);
+    std::string fen_before = pos.to_fen();
+    UndoInfo u;
+    pos.make_move(castle, u);
+    // Post-castle: king on G1, rook on F1.
+    CHECK(pos.board[G1] == W_KING);
+    CHECK(pos.board[F1] == W_ROOK);
+    CHECK(pos.board[C1] == NO_PIECE);
+    CHECK(pos.board[H1] == NO_PIECE);
+    CHECK((pos.castling & WHITE_OO) == 0);
+    pos.unmake_move(castle, u);
+    CHECK(pos.to_fen() == fen_before);
+    CHECK(pos.board[C1] == W_KING);
+    CHECK(pos.board[H1] == W_ROOK);
+}

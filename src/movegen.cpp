@@ -167,43 +167,66 @@ bool is_square_attacked(const Position& pos, Square sq, Color by) {
     return false;
 }
 
-void generate_castling(const Position& pos, MoveList& moves) {
-    const Color    us   = pos.side_to_move;
-    const Color    them = Color(us ^ 1);
-    const Bitboard occ  = pos.occupied;
+// Inclusive bitboard of squares between `a` and `b` on the same rank
+// (both endpoints included). Used by generate_castling to compute the
+// "must be empty" and "must not be attacked" square sets for Chess960
+// castling, where king and rook starting files vary.
+static Bitboard between_on_rank_inclusive(Square a, Square b) {
+    Square lo = std::min(a, b);
+    Square hi = std::max(a, b);
+    Bitboard bb = 0;
+    for (int s = int(lo); s <= int(hi); ++s) bb |= square_bb(Square(s));
+    return bb;
+}
 
-    // Emit one castling move iff: right is present, squares between king
-    // and rook are empty, and king does not start, pass through, or land
-    // on a square attacked by the opponent. B1/B8 emptiness matters for
-    // the rook's transit but NOT for check-safety — the king does not
-    // pass through it.
-    auto try_castle = [&](int right, Square king_from, Square king_to,
-                          Bitboard between_empty, Square transit) {
-        if ((pos.castling & right) == 0)                {
-            return;
+void generate_castling(const Position& pos, MoveList& moves) {
+    const Color us   = pos.side_to_move;
+    const Color them = Color(us ^ 1);
+    if (pos.pieces[us][KING] == 0U) return;  // test positions may omit king
+    const Square king_from = Square(__builtin_ctzll(pos.pieces[us][KING]));
+    const Rank   home      = (us == WHITE) ? RANK_1 : RANK_8;
+    if (rank_of(king_from) != home) return;
+
+    // Try one side (kingside -> G/F, queenside -> C/D). The rook may
+    // start on ANY file on the home rank in Chess960, and in some SPs
+    // the king doesn't actually move (its king_to equals its king_from).
+    auto try_castle = [&](int right, CastleSide side,
+                          File king_to_file, File rook_to_file) {
+        if ((pos.castling & right) == 0) return;
+        File rook_file = pos.castling_rook_file[us][side];
+        Square rook_from = make_square(rook_file, home);
+        Square king_to   = make_square(king_to_file, home);
+        Square rook_to   = make_square(rook_to_file, home);
+        // Pieces that must be absent from the castling corridor: every
+        // square between king_from <-> king_to and rook_from <-> rook_to,
+        // except for king_from and rook_from themselves (those pieces
+        // are the ones moving).
+        Bitboard must_be_empty =
+            between_on_rank_inclusive(king_from, king_to)
+          | between_on_rank_inclusive(rook_from, rook_to);
+        must_be_empty &= ~square_bb(king_from);
+        must_be_empty &= ~square_bb(rook_from);
+        if ((pos.occupied & must_be_empty) != 0U) return;
+        // Every square the king traverses (inclusive of king_from and
+        // king_to) must not be attacked. Classical chess checks only
+        // 3 squares; Chess960 may check 1-4 depending on king travel.
+        Bitboard king_path = between_on_rank_inclusive(king_from, king_to);
+        while (king_path != 0U) {
+            Square s = pop_lsb(king_path);
+            if (is_square_attacked(pos, s, them)) return;
         }
-        if ((occ & between_empty) != 0U)                {
-            return;
-        }
-        if (is_square_attacked(pos, king_from, them))   {
-            return;
-        }
-        if (is_square_attacked(pos, transit,   them))   {
-            return;
-        }
-        if (is_square_attacked(pos, king_to,   them))   {
-            return;
-        }
+        // Internal encoding keeps the classical shape: from = king_from,
+        // to = king_to (G or C file). This way move_to_uci's classical
+        // output is a pure format of (from, to); the FRC-style
+        // "king-captures-own-rook" UCI form is produced only at the
+        // uci.cpp emission layer when UCI_Chess960 is enabled.
         moves.push_back(make_move(king_from, king_to, MT_CASTLING));
     };
 
-    if (us == WHITE) {
-        try_castle(WHITE_OO,  E1, G1, square_bb(F1) | square_bb(G1),                    F1);
-        try_castle(WHITE_OOO, E1, C1, square_bb(B1) | square_bb(C1) | square_bb(D1),    D1);
-    } else {
-        try_castle(BLACK_OO,  E8, G8, square_bb(F8) | square_bb(G8),                    F8);
-        try_castle(BLACK_OOO, E8, C8, square_bb(B8) | square_bb(C8) | square_bb(D8),    D8);
-    }
+    int ks_right = (us == WHITE) ? WHITE_OO  : BLACK_OO;
+    int qs_right = (us == WHITE) ? WHITE_OOO : BLACK_OOO;
+    try_castle(ks_right, KINGSIDE,  FILE_G, FILE_F);
+    try_castle(qs_right, QUEENSIDE, FILE_C, FILE_D);
 }
 
 void generate_slider_moves(const Position& pos, MoveList& moves, bool captures_only) {

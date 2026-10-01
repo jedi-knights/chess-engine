@@ -48,6 +48,16 @@ void Position::clear() {
     psq_mg[WHITE] = psq_mg[BLACK] = 0;
     psq_eg[WHITE] = psq_eg[BLACK] = 0;
     history_size    = 0;
+    // Classical defaults -- set_from_fen may overwrite these when it
+    // encounters Shredder- or X-FEN castling-rights letters.
+    castling_rook_file[WHITE][KINGSIDE]  = FILE_H;
+    castling_rook_file[WHITE][QUEENSIDE] = FILE_A;
+    castling_rook_file[BLACK][KINGSIDE]  = FILE_H;
+    castling_rook_file[BLACK][QUEENSIDE] = FILE_A;
+    // Deliberately NOT resetting `is_chess960` -- the UCI_Chess960 option
+    // is engine-persistent across FEN loads, and set_from_fen only ever
+    // upgrades it to true (never back to false). An explicit option
+    // handler is the only path to disable it mid-session.
     // NNUE accumulator marked dirty — set_from_fen and the make/unmake
     // hot path bypass put_piece for bitboard reasons, so incremental
     // updates would leave stale weights. Next evaluate() triggers a
@@ -93,14 +103,77 @@ bool Position::set_from_fen(const std::string& fen) {
 
     side_to_move = (active == "w") ? WHITE : BLACK;
 
-    for (char c : castle) {
-        switch (c) {
-            case 'K': castling |= WHITE_OO;  break;
-            case 'Q': castling |= WHITE_OOO; break;
-            case 'k': castling |= BLACK_OO;  break;
-            case 'q': castling |= BLACK_OOO; break;
-            default: break;
+    // Castling rights parsing: accepts classical KQkq, Shredder-FEN file
+    // letters (A-H / a-h), and X-FEN hybrid. For K/Q/k/q we resolve to the
+    // outermost rook of the matching color on the home rank, on the correct
+    // side of the king. For file letters we take the file directly. Any
+    // resolution that leaves the king not on E, or any rook not on A/H,
+    // trips `is_chess960` so the UCI emitter knows to output king-captures-
+    // rook form.
+    auto home_rank = [](Color c) -> Rank { return c == WHITE ? RANK_1 : RANK_8; };
+    auto king_file = [this](Color c) -> int {
+        Bitboard bb = pieces[c][KING];
+        if (bb == 0U) return -1;
+        return int(file_of(Square(__builtin_ctzll(bb))));
+    };
+    auto find_outermost_rook = [this, home_rank, king_file](Color c, bool kingside) -> int {
+        int kf = king_file(c);
+        if (kf < 0) return -1;
+        Bitboard rooks = pieces[c][ROOK] & 0xFFULL << (int(home_rank(c)) * 8);
+        int best = -1;
+        while (rooks != 0U) {
+            Square s = Square(__builtin_ctzll(rooks));
+            rooks &= rooks - 1;
+            int rf = int(file_of(s));
+            if (kingside && rf > kf) {
+                if (best < 0 || rf > best) best = rf;
+            } else if (!kingside && rf < kf) {
+                if (best < 0 || rf < best) best = rf;
+            }
         }
+        return best;
+    };
+    auto set_right = [this](Color c, CastleSide side, int file) {
+        castling_rook_file[c][side] = File(file);
+        if (c == WHITE) castling |= (side == KINGSIDE ? WHITE_OO : WHITE_OOO);
+        else            castling |= (side == KINGSIDE ? BLACK_OO : BLACK_OOO);
+    };
+    for (char c : castle) {
+        if (c == '-') break;
+        if (c == 'K' || c == 'Q' || c == 'k' || c == 'q') {
+            Color col = (c == 'K' || c == 'Q') ? WHITE : BLACK;
+            bool kingside = (c == 'K' || c == 'k');
+            int file = find_outermost_rook(col, kingside);
+            if (file < 0) continue;  // malformed FEN: no rook to resolve to
+            set_right(col, kingside ? KINGSIDE : QUEENSIDE, file);
+        } else if (c >= 'A' && c <= 'H') {
+            int file = c - 'A';
+            int kf = king_file(WHITE);
+            if (kf < 0) continue;
+            set_right(WHITE, file > kf ? KINGSIDE : QUEENSIDE, file);
+        } else if (c >= 'a' && c <= 'h') {
+            int file = c - 'a';
+            int kf = king_file(BLACK);
+            if (kf < 0) continue;
+            set_right(BLACK, file > kf ? KINGSIDE : QUEENSIDE, file);
+        }
+    }
+    // Infer Chess960 from a non-classical king/rook layout. Explicit
+    // UCI_Chess960 override comes from the UCI option setter, not this
+    // path -- an engine toggle is honored, inference just catches the
+    // common case where a Shredder-FEN load didn't go through the option.
+    // Only infer Chess960 when a castling right actually exists AND the
+    // layout for that right isn't classical. A FEN with a non-E king
+    // but no castling rights (e.g. a mid-game position after both sides
+    // castled) is still just standard chess.
+    bool rook_offset = ((castling & WHITE_OO)  != 0 && castling_rook_file[WHITE][KINGSIDE]  != FILE_H)
+                    || ((castling & WHITE_OOO) != 0 && castling_rook_file[WHITE][QUEENSIDE] != FILE_A)
+                    || ((castling & BLACK_OO)  != 0 && castling_rook_file[BLACK][KINGSIDE]  != FILE_H)
+                    || ((castling & BLACK_OOO) != 0 && castling_rook_file[BLACK][QUEENSIDE] != FILE_A);
+    bool king_offset = ((castling & (WHITE_OO | WHITE_OOO)) != 0 && king_file(WHITE) != int(FILE_E))
+                    || ((castling & (BLACK_OO | BLACK_OOO)) != 0 && king_file(BLACK) != int(FILE_E));
+    if (rook_offset || king_offset) {
+        is_chess960 = true;
     }
 
     if (ep != "-" && ep.size() == 2) {
@@ -157,18 +230,44 @@ std::string Position::to_fen() const {
         o << '-';
     }
     else {
-        if ((castling & WHITE_OO) != 0)  {
-            o << 'K';
-        }
-        if ((castling & WHITE_OOO) != 0) {
-            o << 'Q';
-        }
-        if ((castling & BLACK_OO) != 0)  {
-            o << 'k';
-        }
-        if ((castling & BLACK_OOO) != 0) {
-            o << 'q';
-        }
+        // X-FEN output: emit K/Q when the rook is the OUTERMOST of its
+        // color on the home rank on the correct side of the king;
+        // otherwise emit the file letter (Shredder-FEN). Matches chessops'
+        // own emitter so round-trips are stable across chess-board <->
+        // engine boundaries.
+        auto emit_side = [&](Color c, CastleSide side, char outer_letter, char file_base) {
+            if (((castling & (c == WHITE ? (side == KINGSIDE ? WHITE_OO : WHITE_OOO)
+                                         : (side == KINGSIDE ? BLACK_OO : BLACK_OOO))) == 0)) {
+                return;
+            }
+            File f = castling_rook_file[c][side];
+            // Find outermost rook on correct side of king on home rank.
+            Rank home = (c == WHITE) ? RANK_1 : RANK_8;
+            Bitboard rooks = pieces[c][ROOK] & 0xFFULL << (int(home) * 8);
+            Bitboard king  = pieces[c][KING];
+            int kf = king != 0U ? int(file_of(Square(__builtin_ctzll(king)))) : -1;
+            int outermost = -1;
+            Bitboard it = rooks;
+            while (it != 0U) {
+                Square s = Square(__builtin_ctzll(it));
+                it &= it - 1;
+                int rf = int(file_of(s));
+                if (side == KINGSIDE && rf > kf) {
+                    if (outermost < 0 || rf > outermost) outermost = rf;
+                } else if (side == QUEENSIDE && rf < kf) {
+                    if (outermost < 0 || rf < outermost) outermost = rf;
+                }
+            }
+            if (outermost == int(f) && !is_chess960) {
+                o << outer_letter;
+            } else {
+                o << char(file_base + int(f));
+            }
+        };
+        emit_side(WHITE, KINGSIDE,  'K', 'A');
+        emit_side(WHITE, QUEENSIDE, 'Q', 'A');
+        emit_side(BLACK, KINGSIDE,  'k', 'a');
+        emit_side(BLACK, QUEENSIDE, 'q', 'a');
     }
     o << ' ';
     if (ep_square == NO_SQUARE) {
@@ -181,20 +280,30 @@ std::string Position::to_fen() const {
     return o.str();
 }
 
-// Bits cleared from `castling` when a piece leaves OR is captured on that
-// square. King-source and rook-source squares are the only entries that
-// differ from 15 (ALL_CASTLING). ANDing with CR_MASK[from] & CR_MASK[to]
-// handles king moves, rook moves, and rook captures in one step.
-static constexpr int CR_MASK[NUM_SQUARES] = {
-    13, 15, 15, 15, 12, 15, 15, 14,   // rank 1 (A1=~WHITE_OOO, E1=~(WHITE_OO|OOO), H1=~WHITE_OO)
-    15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15,
-     7, 15, 15, 15,  3, 15, 15, 11,   // rank 8 mirror
-};
+// Bits cleared from `castling` when a rook moves off its stored
+// starting square OR an enemy piece captures on that square. Chess960
+// means the rook starting file isn't necessarily A/H, so this must be
+// computed from `castling_rook_file[]` rather than a static table.
+// Call this for both `from` and `to` of every move; the AND accumulates.
+// King moves are handled separately (clear BOTH own-color bits) because
+// the king starting square isn't tracked -- any king move clears rights.
+static int cr_mask_rook_from(const Position& pos, Square s) {
+    int mask = 15;
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        Rank home = (c == WHITE) ? RANK_1 : RANK_8;
+        if (rank_of(s) != home) continue;
+        for (int side = 0; side < 2; ++side) {
+            int bit = (c == WHITE)
+                ? (side == KINGSIDE ? WHITE_OO : WHITE_OOO)
+                : (side == KINGSIDE ? BLACK_OO : BLACK_OOO);
+            if ((pos.castling & bit) == 0) continue;
+            if (file_of(s) == pos.castling_rook_file[c][side]) {
+                mask &= ~bit;
+            }
+        }
+    }
+    return mask;
+}
 
 void Position::recompute_psq() {
     psq_mg[WHITE] = psq_mg[BLACK] = 0;
@@ -288,6 +397,11 @@ void Position::make_move(Move m, UndoInfo& u) {
     u.pawn_key       = pawn_key;
     if (mt == MT_EN_PASSANT) {
         u.captured = Piece(us == WHITE ? B_PAWN : W_PAWN);
+    } else if (mt == MT_CASTLING) {
+        // Castling never captures. In FRC the generic `board[to]` lookup
+        // would see our own rook (king_to can overlap rook_from) and
+        // wrongly flag it as a capture.
+        u.captured = NO_PIECE;
     } else {
         u.captured = board[to];
     }
@@ -302,42 +416,58 @@ void Position::make_move(Move m, UndoInfo& u) {
         key ^= zobrist::EP_FILE[file_of(ep_square)];
     }
 
-    // Remove captured piece first (en passant captures off-square).
-    if (u.captured != NO_PIECE) {
-        Square cap_sq = (mt == MT_EN_PASSANT)
-            ? Square(int(to) + (us == WHITE ? -8 : 8))
-            : to;
-        remove_piece(cap_sq);
-    }
-
-    // Move the piece; promotion changes type at the destination.
-    remove_piece(from);
-    if (mt == MT_PROMOTION) {
-        PieceType promo = move_promotion(m);
-        put_piece(to, Piece(us == WHITE ? promo : promo + 8));
-    } else {
-        put_piece(to, moving);
-    }
-
-    // Castling: the king move is already applied; also move the rook.
     if (mt == MT_CASTLING) {
-        Square rook_from;
-        Square rook_to;
-        if (file_of(to) == FILE_G) {  // kingside
-            rook_from = Square(int(to) + 1);
-            rook_to   = Square(int(to) - 1);
-        } else {                      // queenside (FILE_C)
-            rook_from = Square(int(to) - 2);
-            rook_to   = Square(int(to) + 1);
-        }
-        Piece rook = board[rook_from];
-        assert(type_of(rook) == ROOK);
+        // Internal encoding: from = king_from, to = king_to (G or C file).
+        // In FRC any of {king_from, king_to, rook_from, rook_to} may
+        // overlap another, so the safe sequence is remove-both-then-
+        // put-both: after both removes the four squares are empty and
+        // the two puts can land anywhere without tripping put_piece's
+        // "destination must be empty" assert.
+        CastleSide side = (file_of(to) == FILE_G) ? KINGSIDE : QUEENSIDE;
+        File rook_file  = castling_rook_file[us][side];
+        Rank rank       = rank_of(to);
+        Square king_from = from;
+        Square king_to   = to;
+        Square rook_from = make_square(rook_file, rank);
+        Square rook_to   = make_square(side == KINGSIDE ? FILE_F : FILE_D, rank);
+        Piece king_piece = board[king_from];
+        Piece rook_piece = board[rook_from];
+        assert(type_of(king_piece) == KING);
+        assert(type_of(rook_piece) == ROOK);
+        assert(color_of(king_piece) == us && color_of(rook_piece) == us);
+        remove_piece(king_from);
         remove_piece(rook_from);
-        put_piece(rook_to, rook);
+        put_piece(king_to, king_piece);
+        put_piece(rook_to, rook_piece);
+    } else {
+        // Remove captured piece first (en passant captures off-square).
+        if (u.captured != NO_PIECE) {
+            Square cap_sq = (mt == MT_EN_PASSANT)
+                ? Square(int(to) + (us == WHITE ? -8 : 8))
+                : to;
+            remove_piece(cap_sq);
+        }
+
+        // Move the piece; promotion changes type at the destination.
+        remove_piece(from);
+        if (mt == MT_PROMOTION) {
+            PieceType promo = move_promotion(m);
+            put_piece(to, Piece(us == WHITE ? promo : promo + 8));
+        } else {
+            put_piece(to, moving);
+        }
     }
 
-    // Castling rights: single AND handles king move, rook move, and rook capture.
-    castling &= CR_MASK[from] & CR_MASK[to];
+    // Castling-rights update: king move clears BOTH of own color's bits
+    // (MT_CASTLING implicitly covered because moving is a king);
+    // rook-square checks catch a rook moving off its stored starting
+    // file or being captured there. Unlike classical chess, we can't
+    // use a precomputed CR_MASK table because the rook starting files
+    // vary per game under Chess960.
+    if (type_of(moving) == KING) {
+        castling &= ~(us == WHITE ? (WHITE_OO | WHITE_OOO) : (BLACK_OO | BLACK_OOO));
+    }
+    castling &= cr_mask_rook_from(*this, from) & cr_mask_rook_from(*this, to);
 
     // En passant: set only when a pawn double-pushes; cleared otherwise.
     ep_square = NO_SQUARE;
@@ -394,38 +524,41 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
         --fullmove_number;
     }
 
-    // Undo the piece move. For promotion, restore a pawn at `from` rather
-    // than the promoted piece.
-    Piece at_to = board[to];
-    remove_piece(to);
-    if (mt == MT_PROMOTION) {
-        put_piece(from, Piece(us == WHITE ? W_PAWN : B_PAWN));
-    } else {
-        put_piece(from, at_to);
-    }
-
-    // Restore captured piece (on the ep-target square for en passant).
-    if (u.captured != NO_PIECE) {
-        Square cap_sq = (mt == MT_EN_PASSANT)
-            ? Square(int(to) + (us == WHITE ? -8 : 8))
-            : to;
-        put_piece(cap_sq, u.captured);
-    }
-
-    // Undo castling rook move.
     if (mt == MT_CASTLING) {
-        Square rook_from;
-        Square rook_to;
-        if (file_of(to) == FILE_G) {
-            rook_from = Square(int(to) + 1);
-            rook_to   = Square(int(to) - 1);
-        } else {
-            rook_from = Square(int(to) - 2);
-            rook_to   = Square(int(to) + 1);
-        }
-        Piece rook = board[rook_to];
+        // Mirror make_move's remove-both-then-put-both sequence. The
+        // rook starting file is still in castling_rook_file (it never
+        // changes during a game -- only the castling bitmask does).
+        CastleSide side = (file_of(to) == FILE_G) ? KINGSIDE : QUEENSIDE;
+        File rook_file  = castling_rook_file[us][side];
+        Rank rank       = rank_of(to);
+        Square king_from = from;
+        Square king_to   = to;
+        Square rook_from = make_square(rook_file, rank);
+        Square rook_to   = make_square(side == KINGSIDE ? FILE_F : FILE_D, rank);
+        Piece king_piece = board[king_to];
+        Piece rook_piece = board[rook_to];
+        remove_piece(king_to);
         remove_piece(rook_to);
-        put_piece(rook_from, rook);
+        put_piece(king_from, king_piece);
+        put_piece(rook_from, rook_piece);
+    } else {
+        // Undo the piece move. For promotion, restore a pawn at `from`
+        // rather than the promoted piece.
+        Piece at_to = board[to];
+        remove_piece(to);
+        if (mt == MT_PROMOTION) {
+            put_piece(from, Piece(us == WHITE ? W_PAWN : B_PAWN));
+        } else {
+            put_piece(from, at_to);
+        }
+
+        // Restore captured piece (on the ep-target square for en passant).
+        if (u.captured != NO_PIECE) {
+            Square cap_sq = (mt == MT_EN_PASSANT)
+                ? Square(int(to) + (us == WHITE ? -8 : 8))
+                : to;
+            put_piece(cap_sq, u.captured);
+        }
     }
 
     ep_square      = u.ep_square;

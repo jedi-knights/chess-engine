@@ -76,12 +76,13 @@ void cmd_uci(std::ostream& out) {
          "id author omar\n"
          "option name UseNNUE type check default false\n"
          "option name EvalFile type string default <empty>\n"
+         "option name UCI_Chess960 type check default false\n"
          "uciok\n");
 }
 
 // Minimal `setoption` handler for the two NNUE knobs. Anything else
 // is silently ignored — same behavior as stockfish for unknown names.
-void cmd_setoption(std::istringstream& is, std::ostream& out) {
+void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
     // Expected form: `setoption name X value Y`
     std::string tok, name_val;
     if (!(is >> tok) || tok != "name") { return; }
@@ -112,6 +113,9 @@ void cmd_setoption(std::istringstream& is, std::ostream& out) {
             emit(out, "info string EvalFile load FAILED: " + value +
                       " — classical eval retained\n");
         }
+    } else if (name == "UCI_Chess960") {
+        const bool on = (value == "true" || value == "True" || value == "1");
+        pos.is_chess960 = on;
     }
 }
 
@@ -279,17 +283,20 @@ void cmd_go(std::istringstream& is, const Position& pos, std::ostream& out) {
                     // Full PV walked from the TT. Fall back to just the
                     // bestmove if the walk came up empty (shouldn't
                     // happen post-iteration but the check is cheap).
+                    // PV emission uses the FRC-aware emitter when
+                    // UCI_Chess960 is set, so Lichess's Bot API sees
+                    // the king-captures-rook form it expects.
                     if (iter.pv.empty()) {
-                        line << ' ' << move_to_uci(iter.best_move);
+                        line << ' ' << move_to_uci_output(iter.best_move, pos_copy);
                     } else {
                         for (Move m : iter.pv) {
-                            line << ' ' << move_to_uci(m);
+                            line << ' ' << move_to_uci_output(m, pos_copy);
                         }
                     }
                     line << "\n";
                     emit(*out_ptr, line.str());
                 });
-            emit(*out_ptr, "bestmove " + move_to_uci(r.best_move) + "\n");
+            emit(*out_ptr, "bestmove " + move_to_uci_output(r.best_move, pos_copy) + "\n");
         });
 
     // Non-infinite `go` waits synchronously — the search has a natural
@@ -322,7 +329,7 @@ void uci_loop(std::istream& in, std::ostream& out) {
         is >> cmd;
         if      (cmd == "uci")        { cmd_uci(out); }
         else if (cmd == "isready")    { cmd_isready(out); }
-        else if (cmd == "setoption")  { cmd_setoption(is, out); }
+        else if (cmd == "setoption")  { cmd_setoption(is, pos, out); }
         else if (cmd == "ucinewgame") { wait_for_search();
                                         pos.set_from_fen(STARTPOS_FEN);
                                         clear_transposition_table(); }

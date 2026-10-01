@@ -24,6 +24,13 @@ struct UndoInfo {
     uint64_t pawn_key       = 0;          // pawn-only Zobrist snapshot (for pawn hash)
 };
 
+// Side index within castling_rook_file: KINGSIDE first (kingside castle
+// target is the G-file), QUEENSIDE second (target is the C-file). The
+// index deliberately does NOT match the WHITE_OO/WHITE_OOO bitmask bit
+// order -- those are separate concerns (bitmask tracks "right exists",
+// castling_rook_file tracks "where does the rook start").
+enum CastleSide : int { KINGSIDE = 0, QUEENSIDE = 1 };
+
 struct Position {
     Piece    board[NUM_SQUARES]                  = {};
     Bitboard pieces[NUM_COLORS][NUM_PIECE_TYPES] = {};
@@ -35,6 +42,27 @@ struct Position {
     Square   ep_square       = NO_SQUARE;
     int      halfmove_clock  = 0;
     int      fullmove_number = 1;
+
+    // Chess960 castling: for each color and each castle side, the FILE of
+    // the rook that owns that castling right. Classical startpos: {H, A}
+    // for both colors. For any Chess960 starting position, these are read
+    // from the Shredder- or X-FEN castling-rights field. These values are
+    // set once (by set_from_fen) and never mutated during a game -- when
+    // a rook moves off its starting file, the corresponding bit in
+    // `castling` is cleared instead, so the file stored here becomes
+    // irrelevant from that point on. Keeping the file value stable means
+    // UndoInfo doesn't need to snapshot it.
+    File     castling_rook_file[NUM_COLORS][2] = {
+        {FILE_H, FILE_A},   // WHITE: {KINGSIDE, QUEENSIDE}
+        {FILE_H, FILE_A},   // BLACK
+    };
+    // True when the position was loaded as a Chess960 game -- either via
+    // `UCI_Chess960` option before set_from_fen, or inferred from a FEN
+    // whose king is not on E or whose rook is not on A/H. Only affects
+    // the UCI output format (move_to_uci_output in uci.cpp): internal
+    // move encoding, movegen, and make/unmake are variant-agnostic since
+    // they derive from castling_rook_file either way.
+    bool     is_chess960     = false;
     uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
     // Pawn-only Zobrist: XOR of PIECE_SQ[color][PAWN][sq] over all pawns.
     // Keys the pawn hash table in eval.cpp so pawn-structure terms
