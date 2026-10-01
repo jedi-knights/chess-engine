@@ -446,6 +446,25 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
                            return needs_full_check && !is_legal(pos, m);
                        }),
         moves.end());
+
+    // Racing Kings: it's illegal to leave the opponent in check. The
+    // standard filter above only enforces our own king-safety; after it
+    // runs, every remaining move is pseudo-safe for US but may deliver
+    // check to THEM. We filter those out with a make/unmake probe --
+    // slow but correctness-first for now; a check-detection shortcut
+    // (analogous to the enemy_atk_no_king bitboard) is a tuning task.
+    if (pos.rules == RV_RACING_KINGS) {
+        moves.erase(
+            std::remove_if(moves.begin(), moves.end(),
+                           [&](Move m) {
+                               UndoInfo u;
+                               pos.make_move(m, u);
+                               bool gives_check = in_check(pos);  // side-to-move is opponent now
+                               pos.unmake_move(m, u);
+                               return gives_check;
+                           }),
+            moves.end());
+    }
 }
 
 void generate_moves(Position& pos, MoveList& moves) {

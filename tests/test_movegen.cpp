@@ -380,3 +380,37 @@ TEST_CASE("Horde: rank-1 pawn CANNOT double-push to rank 3 under standard rules"
         CHECK_FALSE((move_from(m) == A1 && move_to(m) == A3));
     }
 }
+
+
+TEST_CASE("Racing Kings: queen moves that would deliver check are filtered out") {
+    Position pos;
+    pos.rules = RV_RACING_KINGS;
+    // White queen on D4, black king on E8 (not currently in check -- D4
+    // doesn't attack E8). From D4 the queen can move to D8 (attacks E8
+    // along the 8th rank -> check -> illegal in RK) or to A1 (no attack
+    // on E8 -> legal in RK). Both are legal under standard chess.
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/3Q4/8/8/7K w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    bool has_d4_d8 = false;
+    bool has_d4_a1 = false;
+    for (Move m : moves) {
+        if (move_from(m) == D4 && move_to(m) == D8) has_d4_d8 = true;
+        if (move_from(m) == D4 && move_to(m) == A1) has_d4_a1 = true;
+    }
+    CHECK_FALSE(has_d4_d8);  // delivers check -> filtered out
+    CHECK(has_d4_a1);         // not a check -> remains
+}
+
+TEST_CASE("Racing Kings: queen check IS legal under standard rules (regression guard)") {
+    Position pos;
+    pos.rules = RV_STANDARD;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/3Q4/8/8/7K w - - 0 1"));
+    MoveList moves;
+    generate_moves(pos, moves);
+    bool has_d4_d8 = false;
+    for (Move m : moves) {
+        if (move_from(m) == D4 && move_to(m) == D8) { has_d4_d8 = true; break; }
+    }
+    CHECK(has_d4_d8);  // standard chess allows giving check
+}
