@@ -528,6 +528,22 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         return 0;
     }
 
+    // King of the Hill: a king on one of the four central squares wins
+    // immediately for that side. The parent made a move; we're the
+    // child negamax so the mover is OUR opponent -- if their king is
+    // on center, they just won and we lost. Check from side-to-move's
+    // perspective: opponent's king on center means we're mated with
+    // the mate-in-ply score encoding so shorter opponent wins score
+    // higher (same convention as classical checkmate).
+    if (pos.rules == RV_KOTH) {
+        constexpr Bitboard KOTH_CENTER =
+            (1ULL << D4) | (1ULL << D5) | (1ULL << E4) | (1ULL << E5);
+        Color them = Color(pos.side_to_move ^ 1);
+        if ((pos.pieces[them][KING] & KOTH_CENTER) != 0U) {
+            return -MATE_SCORE + ply;
+        }
+    }
+
     // Check extension: when the side to move is in check, tactical lines
     // are often deeper than the requested depth. Extend by one ply so
     // mate combinations don't fall off the horizon. Computed once here

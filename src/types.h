@@ -53,6 +53,18 @@ constexpr PieceType type_of (Piece p) { return PieceType(p < B_PAWN ? p : p - 8)
 //   bits 14-15 : move type      (0=normal, 1=promotion, 2=en passant, 3=castling)
 using Move = uint16_t;
 
+// Rule-level variants (as opposed to Chess960, which is a FEN-level
+// variant that doesn't change win conditions). Each entry here adjusts
+// terminal detection / eval; movegen is still standard chess. Set by
+// the UCI_Variant option; `clear()` deliberately preserves this value
+// across set_from_fen (same pattern as is_chess960) so a
+// `setoption name UCI_Variant value kingofthehill` persists across
+// subsequent `position` commands.
+enum RuleVariant : std::uint8_t {
+    RV_STANDARD = 0,
+    RV_KOTH     = 1,
+};
+
 enum MoveType : std::uint8_t {
     MT_NORMAL     = 0,
     MT_PROMOTION  = 1,

@@ -77,6 +77,7 @@ void cmd_uci(std::ostream& out) {
          "option name UseNNUE type check default false\n"
          "option name EvalFile type string default <empty>\n"
          "option name UCI_Chess960 type check default false\n"
+         "option name UCI_Variant type string default chess\n"
          "uciok\n");
 }
 
@@ -116,6 +117,18 @@ void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
     } else if (name == "UCI_Chess960") {
         const bool on = (value == "true" || value == "True" || value == "1");
         pos.is_chess960 = on;
+    } else if (name == "UCI_Variant") {
+        // Lichess sends the variant key as the value: "chess",
+        // "kingofthehill", "threecheck", "antichess", "atomic",
+        // "horde", "racingkings", "crazyhouse". Only recognized values
+        // flip the rule set; anything else falls through to RV_STANDARD
+        // (equivalent to "chess") so a GUI probing with an unknown
+        // variant doesn't leave the engine in a mystery state.
+        if (value == "kingofthehill" || value == "kingOfTheHill") {
+            pos.rules = RV_KOTH;
+        } else {
+            pos.rules = RV_STANDARD;
+        }
     }
 }
 
