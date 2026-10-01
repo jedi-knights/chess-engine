@@ -63,6 +63,10 @@ struct Position {
     // move encoding, movegen, and make/unmake are variant-agnostic since
     // they derive from castling_rook_file either way.
     bool     is_chess960     = false;
+    // Rule-level variant (KotH, three-check, antichess, atomic, ...).
+    // Set by UCI_Variant; preserved across set_from_fen for the same
+    // reason is_chess960 is (the UCI option is engine-persistent).
+    RuleVariant rules        = RV_STANDARD;
     uint64_t key             = 0;        // Zobrist hash; kept in sync by set_from_fen and make/unmake
     // Pawn-only Zobrist: XOR of PIECE_SQ[color][PAWN][sq] over all pawns.
     // Keys the pawn hash table in eval.cpp so pawn-structure terms

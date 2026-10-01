@@ -7,6 +7,7 @@
 #include "support.h"
 
 #include "movegen.h"
+#include "notation.h"
 #include "position.h"
 #include "search.h"
 
@@ -282,4 +283,30 @@ TEST_CASE("iterative deepening honors movetime_ms as an upper bound") {
     CHECK(r.best_move != NULL_MOVE);
     // Slack for the 1024-node polling granularity and doctest overhead.
     CHECK(elapsed < 2000);
+}
+
+
+TEST_CASE("King of the Hill: opponent king on center returns mate-against-us score") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/4K3/8/8/8 w - - 0 1"));
+    pos.rules = RV_KOTH;
+    // Root is white-to-move; opponent (BLACK) king is on E8, not
+    // center, so no terminal fires at root. White makes e4d4 (centers)
+    // in one ply; depth 1 should report "mate 1".
+    SearchLimits limits;
+    limits.max_depth = 2;
+    SearchResult r = search_iterative(pos, limits, [](const SearchResult&){});
+    CHECK(r.score > MATE_SCORE - 100);  // positive mate score (we deliver)
+    CHECK(move_to_uci(r.best_move) == "e4d4");
+}
+
+TEST_CASE("King of the Hill: unaffected when rules is RV_STANDARD") {
+    Position pos;
+    REQUIRE(pos.set_from_fen("4k3/8/8/8/4K3/8/8/8 w - - 0 1"));
+    // Default rules (RV_STANDARD): no terminal shortcut.
+    SearchLimits limits;
+    limits.max_depth = 2;
+    SearchResult r = search_iterative(pos, limits, [](const SearchResult&){});
+    // Should NOT be a mate score -- just a positional eval.
+    CHECK(std::abs(r.score) < MATE_SCORE - 1000);
 }
