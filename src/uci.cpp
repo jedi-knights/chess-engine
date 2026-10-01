@@ -134,6 +134,8 @@ void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
             pos.rules = RV_RACING_KINGS;
         } else if (value == "atomic") {
             pos.rules = RV_ATOMIC;
+        } else if (value == "antichess") {
+            pos.rules = RV_ANTICHESS;
         } else {
             pos.rules = RV_STANDARD;
         }

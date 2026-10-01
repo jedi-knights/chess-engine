@@ -592,6 +592,18 @@ int negamax(Position& pos, int depth, int alpha, int beta,
         }
     }
 
+    // Antichess: the goal is to LOSE all pieces or get stalemated.
+    // Side-to-move with zero pieces has already achieved the goal and
+    // WINS -- return positive mate score (MATE_SCORE - ply, so faster
+    // wins score higher). The no-moves case is handled in the standard
+    // "moves.empty()" branch further down, which also returns a WIN
+    // score for Antichess (opposite of standard chess).
+    if (pos.rules == RV_ANTICHESS) {
+        if (pos.colors[pos.side_to_move] == 0U) {
+            return MATE_SCORE - ply;
+        }
+    }
+
     // Check extension: when the side to move is in check, tactical lines
     // are often deeper than the requested depth. Extend by one ply so
     // mate combinations don't fall off the horizon. Computed once here
@@ -726,6 +738,13 @@ int negamax(Position& pos, int depth, int alpha, int beta,
     generate_moves(pos, moves);
 
     if (moves.empty()) {
+        // Antichess: no legal moves (whether stalemated or checkmated,
+        // which isn't a concept here anyway) = we WIN. Opposite of
+        // standard chess. Check this FIRST since Antichess has no
+        // check concept.
+        if (pos.rules == RV_ANTICHESS) {
+            return MATE_SCORE - ply;
+        }
         if (node_in_check) {
             return -MATE_SCORE + ply;
         }
