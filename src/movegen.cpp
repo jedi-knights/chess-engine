@@ -397,7 +397,8 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
 
     generate_pawn_moves  (pos, moves, captures_only);
     generate_slider_moves(pos, moves, captures_only);
-    if (!captures_only) {
+    if (!captures_only && pos.rules != RV_ANTICHESS) {
+        // Antichess has no castling (and no check concept at all).
         generate_castling(pos, moves);
     }
 
@@ -426,26 +427,54 @@ void generate_moves_impl(Position& pos, MoveList& moves, bool captures_only) {
         ? attacks_by(pos, Color(us ^ 1), pos.occupied ^ king_bb)
         : 0;
 
-    moves.erase(
-        std::remove_if(moves.begin(), moves.end(),
-                       [&](Move m) {
-                           if (move_type(m) == MT_CASTLING) {
-                               return false;
-                           }
-                           Square from = move_from(m);
-                           Square to   = move_to(m);
-                           if (from == king_sq && pos.board[to] == NO_PIECE) {
-                               // Non-capture king move: illegal iff dest is attacked.
-                               return (square_bb(to) & enemy_atk_no_king) != 0;
-                           }
-                           bool needs_full_check =
-                               in_check_now                            ||
-                               from == king_sq                         ||
-                               move_type(m) == MT_EN_PASSANT           ||
-                               ((pinned & square_bb(from)) != 0U);
-                           return needs_full_check && !is_legal(pos, m);
-                       }),
-        moves.end());
+    // Antichess has no check concept at all -- skip the standard
+    // "my king not in check" filter entirely. Pseudo-legal moves are
+    // legal moves. The mandatory-capture-when-any-capture-exists rule
+    // is applied below.
+    if (pos.rules != RV_ANTICHESS) {
+        moves.erase(
+            std::remove_if(moves.begin(), moves.end(),
+                           [&](Move m) {
+                               if (move_type(m) == MT_CASTLING) {
+                                   return false;
+                               }
+                               Square from = move_from(m);
+                               Square to   = move_to(m);
+                               if (from == king_sq && pos.board[to] == NO_PIECE) {
+                                   // Non-capture king move: illegal iff dest is attacked.
+                                   return (square_bb(to) & enemy_atk_no_king) != 0;
+                               }
+                               bool needs_full_check =
+                                   in_check_now                            ||
+                                   from == king_sq                         ||
+                                   move_type(m) == MT_EN_PASSANT           ||
+                                   ((pinned & square_bb(from)) != 0U);
+                               return needs_full_check && !is_legal(pos, m);
+                           }),
+            moves.end());
+    }
+
+    // Antichess: if ANY capture is available, non-captures are illegal.
+    // The player must capture (any capture of their choice). Ep captures
+    // count as captures.
+    if (pos.rules == RV_ANTICHESS) {
+        bool has_capture = false;
+        for (Move m : moves) {
+            if (pos.board[move_to(m)] != NO_PIECE || move_type(m) == MT_EN_PASSANT) {
+                has_capture = true;
+                break;
+            }
+        }
+        if (has_capture) {
+            moves.erase(
+                std::remove_if(moves.begin(), moves.end(),
+                               [&](Move m) {
+                                   return pos.board[move_to(m)] == NO_PIECE
+                                       && move_type(m) != MT_EN_PASSANT;
+                               }),
+                moves.end());
+        }
+    }
 
     // Racing Kings: it's illegal to leave the opponent in check. The
     // standard filter above only enforces our own king-safety; after it
