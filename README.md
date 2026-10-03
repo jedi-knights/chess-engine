@@ -164,18 +164,75 @@ go depth 8
 
 ## NNUE
 
-Classical evaluation adds up handcrafted terms — material, piece-square tables, mobility, pawn structure, king safety. Every extra term needs a human to (a) name a chess concept, (b) hand-tune its weight, (c) prove via SPRT it actually adds Elo. Progress is linear in the author's chess knowledge and time.
+If you're new to chess engines, this section is the long version — written to be read top to bottom. It explains what NNUE is, why it exists, how it works in this repo, and (importantly) what enabling it does and does not do. If you already know what NNUE is, skim down to "Pipeline in this repo."
 
-**NNUE** (Efficiently Updatable Neural Network) skips the handcrafting: a small neural network reads the raw board and outputs a score. The trick is the "efficiently updatable" part — the input to a chess network is 41,024 sparse features per side (HalfKP: one feature per `(king_square, piece_square, piece_type, piece_color)` combination), and recomputing all of them per position would be far slower than any classical eval. Instead the network's first-layer output is kept as a **per-position accumulator**: when a piece moves, only the affected feature-weight columns change, so `O(features per move)` scalar updates in `Position::put_piece` / `remove_piece` keep the accumulator in sync — cheaper than the classical mobility loop it replaces.
+### What a chess engine's "evaluation" is doing
 
-This repo's NNUE stack (all shipped, all off by default):
+A chess engine plays by searching ahead: *if I play Nf3, you play e5, I play Bb5...* — millions of such hypothetical positions per second, pruning the obviously bad branches. At every leaf of that search tree, the engine has to answer **one question**: *how good is this position for me?* It answers with a single number in centipawns — positive means White looks winning, negative means Black does. A pawn is worth about 100; a mate is encoded as a huge positive or negative value.
 
-| Layer                        | What it does                                                                                                                                                  |
-|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Runtime** (`src/nnue.*`)   | HalfKP → 256 → 1 forward pass. Per-side accumulator on `Position` with dirty flags for king moves (only the moving side's perspective invalidates).           |
-| **SIMD** (`src/nnue_simd.h`) | NEON kernels for AArch64 (Apple Silicon), AVX2 kernels for x86-64. Scalar reference always compiled; SIMD-vs-reference equivalence is unit-tested.            |
+That single number — called the **evaluation** or **eval** — is the hinge the whole engine turns on. Make it 10% more accurate and the engine plays measurably stronger chess, because every search decision is informed by better scoring at the leaves.
+
+### Why handcrafted eval hit a wall
+
+For 50 years, every top chess engine wrote the eval function by hand. The author would:
+
+1. **Name a chess concept** — "passed pawns are strong," "a bishop pair is worth 50 centipawns," "a king on an open file in the middlegame is a weakness."
+2. **Pick a weight** — turn each concept into a number to add or subtract.
+3. **Tune by playing games** — run a match of the new version against the old, and if the new one scores above 50% + enough margin, keep the change. If not, revert.
+
+This works, but it compounds slowly. Every term is one author's idea of what chess knowledge should look like, and every weight is tuned in isolation. Interactions between terms — "a bishop pair is only worth 50 cp *if* the position is open" — need yet more terms. Progress is linear in author-hours. By 2018, top engines had hundreds of hand-tuned terms and the ceiling was visible.
+
+This repo still ships that classical eval (see `src/eval.cpp` for 50+ terms including material, piece-square tables, mobility, pawn structure, king safety, bishop pair). It is a solid but handcrafted ceiling.
+
+### What a neural network changes
+
+A neural network, in the context of chess evaluation, is just a learned function `f(position) → score`. Instead of a human writing dozens of weighted terms, you:
+
+1. **Collect labeled positions.** Lots of them — millions. Each is a FEN string plus a "correct" score (usually from a stronger engine like Stockfish, or from the eventual game outcome).
+2. **Define a network shape.** A fixed set of weights, arranged in layers, that gets multiplied against the position features and squashed down to one number.
+3. **Train.** Repeatedly nudge the weights so that the network's output matches the labels better, averaged across all the training positions.
+
+By the end of training you have a function that encodes patterns the handcrafted eval couldn't easily name — "a knight on this square *given* this pawn structure *given* the king is here is worth +12 cp" — because the network has the capacity to represent interactions that would take hundreds of hand-written terms.
+
+### Why "Efficiently Updatable" is the clever part
+
+The naive version has a problem: calling a neural network with a 41,024-feature input is thousands of times slower than classical eval. Search throughput would drop from millions of positions per second to thousands, which more than cancels any gain from better per-position scores.
+
+The NNUE insight (Yu Nasu, 2018, originally for shogi; adopted by Stockfish for chess in 2020) is that *during search*, consecutive positions are very similar — one move apart. If a knight moves from `f3` to `e5`, only a handful of the 41,024 input features change. So you don't need to recompute the first layer from scratch; you can **update it incrementally** — subtract the row for `(knight, f3)`, add the row for `(knight, e5)`. This gives you a per-position cached state called the **accumulator**, and keeping it current costs only a few additions per move.
+
+That is literally what "N·N·U·E" stands for: **Efficiently Updatable Neural Network** — the letters are reversed because the original paper was Japanese. In this repo, the `src/nnue.cpp` hooks `put_piece` and `remove_piece` are exactly where the incremental update happens; the full accumulator refresh only runs when the king moves (which is the one case where many features change at once — HalfKP indexes everything relative to king square).
+
+### Does enabling NNUE make the engine learn from my games?
+
+**No. This is the single most common misunderstanding of the feature.**
+
+`UseNNUE` is a **load-time switch**. When you set it on and point `EvalFile` at a `.jnn1`, the engine replaces its classical eval function with a forward pass through that network. During gameplay the engine *reads* the network's weights to score positions, but it never *writes* to them. No gradients are computed, no weights are updated, nothing is persisted to disk when a game ends. If you played 10,000 games with `UseNNUE=true`, the file on disk would be byte-identical to how it started.
+
+Learning in NNUE engines is **offline, between releases**. You:
+
+1. Collect games (self-play, or your own, or anyone's).
+2. Label the positions in those games with a stronger teacher (Stockfish is standard).
+3. Retrain the network on the growing labeled corpus.
+4. Validate the new network beats the old one in head-to-head games (SPRT, see `## Evaluation` below).
+5. Only if it wins, ship the new `.jnn1` as the default.
+
+This repo ships every piece of that pipeline — see "Teaching the net from your own games" below. But the "learning" step happens *between* games, not during them. Every production chess engine (Stockfish, Leela, Berserk, Obsidian) follows exactly this pattern. "Live-updating weights mid-game" is architecturally incompatible with the millions-of-nodes-per-second search a competitive engine needs — gradient computation inside the search hot path would wipe out the throughput advantage NNUE exists to preserve.
+
+### Pipeline in this repo
+
+Everything NNUE is off by default. The pieces are:
+
+| Layer                            | What it does                                                                                                                                                  |
+|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Runtime** (`src/nnue.*`)       | HalfKP → 256 → 1 forward pass. Per-side accumulator on `Position` with dirty flags for king moves (only the moving side's perspective invalidates).           |
+| **SIMD** (`src/nnue_simd.h`)     | NEON kernels for AArch64 (Apple Silicon), AVX2 kernels for x86-64. Scalar reference always compiled; SIMD-vs-reference equivalence is unit-tested.            |
 | **JNN1 format** (`src/nnue.cpp`) | Custom int16 quantized binary — `"JNN1"` magic + `uint32 {version, hidden, features}` header + weights. Header-validated on load; not Stockfish-compatible.   |
-| **Trainer** (`training/`)    | Python `torch` pipeline. Reads `fen;wdl` / `fen\|cp` self-play data → HalfKP encoding → MSE-on-sigmoid loss → int16 export in the runtime's format.           |
+| **Trainer** (`training/`)        | Python `torch` pipeline. Reads `fen;wdl` / `fen\|cp` data → HalfKP encoding → MSE-on-sigmoid loss → AdamW + cosine LR + gradient clip → int16 export.         |
+| **Data generation** (`scripts/`) | `gen_selfplay_data.py` (play games), `stockfish_label.py` (score positions with Stockfish), `pgn_to_fens.py` (ingest external PGNs), `learning_loop.py` (end-to-end orchestration). |
+
+### HalfKP in one paragraph
+
+The network sees the board as two sparse feature vectors — one from White's perspective, one from Black's. Each perspective has 41,024 possible features. A feature is an index of the form `(my_king_square, piece_type, piece_color, piece_square)` — one feature per `(king, non-king piece)` pair. Kings themselves are excluded from features; they are the *reference point* that every other piece's feature is anchored to. In a typical middlegame position about 30 of the 41,024 features are "on" (one per non-king piece per side × 2 perspectives). That extreme sparsity is why `EmbeddingBag` in PyTorch (and the equivalent sum-of-rows loop in `src/nnue.cpp`) is the right primitive here.
 
 ### Loading a network at runtime
 
@@ -202,13 +259,48 @@ See [`training/README.md`](training/README.md) for the full workflow. Short form
 scripts/gen_selfplay_data.py --games 500 --output data/selfplay.txt
 # Or reuse the checked-in tests/data/selfplay_500.txt (49,772 positions).
 
-# 2. Train — uv resolves torch + python-chess on first run and caches
-training/train.py --data data/selfplay.txt --out net.jnn1 --epochs 20
+# 2. (Optional, recommended) Re-score with a stronger teacher.
+scripts/stockfish_label.py --input data/selfplay.txt \
+    --output data/sf_labeled.txt --depth 10
 
-# 3. Point the engine at the .jnn1 (see "Loading a network" above)
+# 3. Train — uv resolves torch + python-chess on first run and caches.
+training/train.py --data data/sf_labeled.txt --out net.jnn1 --epochs 40
+
+# 4. Point the engine at the .jnn1 (see "Loading a network" above).
 ```
 
 Correctness bridge: the Python `feature_index()` is pinned against the C++ `nnue::feature_index()` values in `tests/test_nnue.cpp` — a divergence would silently make trained networks unusable at inference.
+
+### Teaching the net from your own games
+
+If you have a directory full of `.pgn` files — games your engine played on Lichess, in cutechess matches, or anywhere else — `scripts/learning_loop.py` is a one-shot orchestrator that:
+
+1. Ingests new PGNs into a growing `FEN;outcome` corpus (`pgn_to_fens.py` — tracks a sidecar `.processed` log so re-runs are idempotent)
+2. Re-labels the corpus with Stockfish at a chosen depth (`stockfish_label.py`)
+3. Trains a candidate network (`training/train.py`)
+4. (Optional) Runs SPRT between candidate and current default (`scripts/sprt.py`)
+5. (Optional) Promotes the candidate to `nets/default.jnn1` only if SPRT accepts H1
+
+The script never overwrites your shipped network unless both `--sprt` and `--promote` are passed and the SPRT accepts. A conservative run:
+
+```bash
+scripts/learning_loop.py --pgn-dir ~/games/ \
+    --corpus data/played_games.txt \
+    --candidate /tmp/candidate.jnn1
+# Produces /tmp/candidate.jnn1. You SPRT and promote manually.
+```
+
+And the full "set it and forget it" nightly form (cron / GitHub Action):
+
+```bash
+scripts/learning_loop.py --pgn-dir /mnt/games/ \
+    --corpus data/played_games.txt \
+    --candidate /tmp/candidate.jnn1 \
+    --baseline nets/default.jnn1 \
+    --sprt --promote
+```
+
+This is the architecture that "learns from played games" — not during a game, but by taking the games you played, mixing them into a growing training corpus, and periodically retraining a stronger network from the whole corpus. The engine on disk gets smarter over time; the running engine itself does not change its weights.
 
 ## Development
 
