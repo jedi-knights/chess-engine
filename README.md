@@ -236,7 +236,7 @@ The network sees the board as two sparse feature vectors — one from White's pe
 
 ### Loading a network at runtime
 
-A default network ships in [`nets/default.jnn1`](nets/default.jnn1) — the peak of a 4-round self-bootstrap chain (see [`nets/README.md`](nets/README.md) for provenance). Enable it per-run:
+A default network ships in [`nets/default.jnn1`](nets/default.jnn1) — v7, trained on a Stockfish-labeled 100k-position corpus (see [`nets/README.md`](nets/README.md) for provenance). Enable it per-run:
 
 ```bash
 $ ./engine
@@ -248,7 +248,7 @@ go depth 8
 
 Order matters — set `EvalFile` before `UseNNUE=true` to avoid a transient `info string UseNNUE=true but no network loaded` warning. The engine logs `nnue: loaded '<path>' (256 hidden units, 41024 features)` on success and emits `info string EvalFile loaded: <path>`. A missing / mistyped / architecture-mismatched file is rejected and the engine keeps whatever eval mode was active before.
 
-**Note:** at present the classical eval measurably outplays the shipped NNUE in gameplay — the network is +130 Elo over its own WDL-trained seed but still loses to classical. Enable NNUE for experimentation; leave it off (the default) for competitive play.
+**Note:** classical eval still outplays the shipped NNUE by ~1000 Elo at `tc=5+0.05` (SPRT measured 1-293-0 for v7 vs classical over 294 games). v7 is a +900 Elo upgrade over the previous shipped net (v4) but the ceiling to classical is further out than any single-corpus training round can cross — likely wants a larger hidden layer and HalfKAv2 features. Enable NNUE for experimentation and continued training; leave it off (the default) for competitive play.
 
 ### Training a network
 
