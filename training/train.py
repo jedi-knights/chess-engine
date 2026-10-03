@@ -26,11 +26,13 @@ file trains coherently.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
 
 import torch
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, random_split
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -51,6 +53,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch", type=int, default=1024)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-4,
+        help="AdamW decoupled weight decay (0 disables)",
+    )
+    p.add_argument(
+        "--warmup-frac",
+        type=float,
+        default=0.05,
+        help="Fraction of total epochs spent in linear LR warmup",
+    )
+    p.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Max L2 norm for gradient clipping (0 disables)",
+    )
     p.add_argument("--val-frac", type=float, default=0.05)
     p.add_argument(
         "--score-scale",
@@ -60,6 +80,84 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
+
+
+def build_optimizer(
+    model: torch.nn.Module, lr: float, weight_decay: float
+) -> torch.optim.Optimizer:
+    """Construct the trainer's optimizer.
+
+    Uses `AdamW` so weight decay is decoupled from the gradient
+    update — plain `Adam` with a nonzero `weight_decay` applies the
+    penalty through the running moment estimates, which interacts
+    poorly with the sparse `EmbeddingBag` feature table.
+
+    Args:
+        model: The NNUE module whose parameters should be optimized.
+        lr: Peak learning rate (before any scheduler modulation).
+        weight_decay: Decoupled weight decay coefficient.
+
+    Returns:
+        An `AdamW` optimizer bound to every trainable parameter.
+    """
+    return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+
+def build_scheduler(
+    opt: torch.optim.Optimizer, total_steps: int, warmup_frac: float
+) -> torch.optim.lr_scheduler.LRScheduler:
+    """Build a linear-warmup → cosine-decay LR schedule.
+
+    The first `floor(total_steps * warmup_frac)` steps ramp the LR
+    linearly from near-zero to the optimizer's base LR; the remaining
+    steps follow a half-cosine down to near-zero.
+
+    Args:
+        opt: Optimizer whose LR will be modulated.
+        total_steps: Total scheduler steps across the whole training run.
+            Pass the epoch count when stepping once per epoch.
+        warmup_frac: Fraction of `total_steps` to spend in warmup.
+            Must be in `[0, 1)`.
+
+    Returns:
+        A `LambdaLR` scheduler. Call `.step()` once per epoch.
+    """
+    warmup_steps = max(1, int(total_steps * warmup_frac))
+    cos_denom = max(1, total_steps - warmup_steps)
+
+    def lr_lambda(step: int) -> float:
+        """Return the LR multiplier at the given scheduler step.
+
+        Args:
+            step: Zero-indexed step count (scheduler-internal).
+
+        Returns:
+            Multiplier applied to the optimizer's base LR.
+        """
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+
+        progress = (step - warmup_steps) / cos_denom
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return LambdaLR(opt, lr_lambda=lr_lambda)
+
+
+def clip_gradients(model: torch.nn.Module, max_norm: float) -> None:
+    """Clip gradients in-place so their total L2 norm is at most `max_norm`.
+
+    A single catastrophic batch can produce gradients large enough to
+    push accumulator weights outside the int16 quantization range —
+    the resulting network loads but evaluates nonsensically. Clipping
+    at 1.0 is a cheap guardrail against that drift.
+
+    Args:
+        model: Module whose parameters' `.grad` fields will be clipped.
+        max_norm: L2 norm cap. Pass `0` to disable (no-op).
+    """
+    if max_norm <= 0.0:
+        return
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
 
 
 def _to_wdl(
@@ -88,6 +186,7 @@ def _run_epoch(
     opt: torch.optim.Optimizer | None,
     device: torch.device,
     k: float,
+    grad_clip: float = 0.0,
 ) -> float:
     """Run one training or eval epoch.
 
@@ -97,6 +196,9 @@ def _run_epoch(
         opt: Optimizer for training; pass `None` for eval mode.
         device: Torch device.
         k: Score scale for the sigmoid conversion.
+        grad_clip: Max L2 norm for gradient clipping. Pass `0` to
+            disable (default for backward compatibility with the
+            eval-mode call site, where no gradients are produced).
 
     Returns:
         Mean per-example loss over the pass.
@@ -120,6 +222,7 @@ def _run_epoch(
             if opt is not None:
                 opt.zero_grad()
                 loss.backward()
+                clip_gradients(model, grad_clip)
                 opt.step()
 
             total += loss.item() * targets.size(0)
@@ -160,16 +263,26 @@ def main() -> int:
     print(f"device: {device}")
 
     model = NNUE().to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    opt = build_optimizer(model, lr=args.lr, weight_decay=args.weight_decay)
+    sched = build_scheduler(opt, total_steps=args.epochs, warmup_frac=args.warmup_frac)
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_loss = _run_epoch(model, train_loader, opt, device, args.score_scale)
+        train_loss = _run_epoch(
+            model,
+            train_loader,
+            opt,
+            device,
+            args.score_scale,
+            grad_clip=args.grad_clip,
+        )
         val_loss = _run_epoch(model, val_loader, None, device, args.score_scale)
+        sched.step()
         dt = time.time() - t0
+        lr_now = opt.param_groups[0]["lr"]
         print(
             f"epoch {epoch:3d}  train_loss={train_loss:.6f}  "
-            f"val_loss={val_loss:.6f}  ({dt:.1f}s)"
+            f"val_loss={val_loss:.6f}  lr={lr_now:.2e}  ({dt:.1f}s)"
         )
 
     export_network(model, args.out)
