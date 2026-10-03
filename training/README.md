@@ -44,7 +44,10 @@ runs without downloading PyTorch:
 
    - `--epochs 20` — training epochs
    - `--batch 1024` — batch size
-   - `--lr 1e-3` — Adam learning rate
+   - `--lr 1e-3` — AdamW peak learning rate
+   - `--weight-decay 1e-4` — AdamW decoupled weight decay (0 disables)
+   - `--warmup-frac 0.05` — fraction of total epochs spent in linear warmup; cosine decay follows
+   - `--grad-clip 1.0` — max L2 norm for gradient clipping (0 disables)
    - `--score-scale 400` — WDL sigmoid divisor (Stockfish uses 400)
    - `--val-frac 0.05` — fraction held out for validation
    - `--seed 42` — RNG seed for split + init
@@ -83,10 +86,42 @@ add per-layer weight clipping to `training/model.py`. Saturation is
 information-lossy — the model as loaded will differ from the model
 as trained.
 
+## Learning from played games
+
+If you have `.pgn` files of actual games (lichess downloads, cutechess
+match PGNs, your own GUI exports), you can feed them back into the
+corpus and retrain. Pipeline:
+
+    # 1. Ingest new PGNs into a growing FEN;outcome corpus (idempotent
+    #    via a .processed sidecar log; safe to re-run on the same dir).
+    scripts/pgn_to_fens.py --input ~/games/ \
+        --corpus data/played_games.txt
+
+    # 2. Re-label with Stockfish — stronger teacher than the game
+    #    outcome alone.
+    scripts/stockfish_label.py --input data/played_games.txt \
+        --output data/played_games_sf.txt --depth 10
+
+    # 3. Train on the labeled corpus.
+    training/train.py --data data/played_games_sf.txt \
+        --out /tmp/candidate.jnn1 --epochs 40
+
+`scripts/learning_loop.py` wires those three steps together with
+optional SPRT validation and auto-promote (see the engine's root
+`README.md` section "Teaching the net from your own games"). It is
+deliberately conservative — never overwrites `nets/default.jnn1`
+unless both `--sprt` and `--promote` are passed *and* the SPRT accepts
+H1.
+
+**The engine never updates weights during gameplay.** All learning is
+offline, from captured PGNs through this pipeline, between release
+builds.
+
 ## Testing
 
     training/test_encoding.py    # fast, no PyTorch
     training/test_export.py      # full pipeline, needs PyTorch
+    training/test_train.py       # optimizer/scheduler/clip wiring, needs PyTorch
 
 Both are self-contained runners — no `pytest` required, though
 `pytest training/` also discovers and runs them since they follow
@@ -106,16 +141,15 @@ verified end-to-end during the training-pipeline PR (#43).
     ├── dataset.py           -- torch Dataset + collate_fn
     ├── model.py             -- NNUE nn.Module
     ├── export.py            -- float → int16 + JNN1 writer
-    ├── train.py             -- training loop entry point
+    ├── train.py             -- training loop entry point (AdamW + cosine LR + grad clip)
     ├── test_encoding.py     -- encoding tests (lightweight)
-    └── test_export.py       -- export + training tests
+    ├── test_export.py       -- export + training tests
+    └── test_train.py        -- optimizer / scheduler / grad clip tests
 
 ## Limitations
 
 - No GPU-specific optimizations (works on CPU or CUDA if available).
-- No PGN ingestion — data must be preformatted.
 - No incremental training / checkpointing — every run trains from
   scratch. Add if you plan multi-day training runs.
-- No training-time weight clipping. Watch the saturation warnings.
 - Fixed HalfKP → 256 → 1 architecture. Changing hidden size means
   changing the C++ runtime constants too (`nnue_types.h`).
