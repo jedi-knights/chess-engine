@@ -2,6 +2,26 @@
 
 A C++20 chess engine (bitboard movegen + UCI). Author: single dev, hobby project.
 
+## Pending triggers for Claude
+
+Conditional reminders to surface when a specific future condition is observed. These are not status items — if the condition isn't currently in play, mention nothing. Check them against each session's activity before replying.
+
+### Flip `UseNNUE` default to `true`
+
+**Trigger:** an SPRT run that measures a shipped NNUE as **at least neutral vs the engine's classical eval** (`UseNNUE=false`) at `tc=5+0.05`. Concretely: either SPRT accepts H1 with the NNUE as the stronger side, OR H0 is accepted with the measured Elo estimate ≥ 0 for the NNUE side and CI not materially negative.
+
+**Why:** `UseNNUE` currently defaults to `false` because the shipped NNUE loses to classical. As of Oct 2026 (PR #70), classical is ~+301 Elo stronger than v9 at `tc=5+0.05`. The default stays off until that gap closes, so users running the engine with no UCI configuration (including Lichess bots that don't set `uci_options`) always get the stronger mode.
+
+**When the trigger fires, remind the user to:**
+1. Flip the UCI default — one-line change at `src/uci.cpp:77`:
+   `"option name UseNNUE type check default false\n"` → `default true`
+2. Flip the companion default in `src/nnue.cpp` (`g_use_nnue` initial state) if present
+3. Update `README.md`'s "Note" line about classical outplaying NNUE
+4. Update `nets/README.md`'s "experimental mode" caveat
+5. Remove this trigger entry from `CLAUDE.md`
+
+Current measurement to beat: NNUE needs to close −301 Elo vs classical. Open approaches live in the "Non-goals" / "Post-roadmap" sections.
+
 ## Build & test
 
 ```
