@@ -22,7 +22,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-HIDDEN_SIZE = 256
+HIDDEN_SIZE = 512
 FEATURES_PER_KING = 641  # 64 squares × 10 slots + 1 padding
 TOTAL_FEATURES = 64 * FEATURES_PER_KING  # 41,024
 

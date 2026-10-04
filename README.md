@@ -55,7 +55,7 @@ Currently implemented (all 8 milestones plus post-roadmap search / eval / UCI wo
 - Perft driver and 6-position standard test suite
 - Evaluation: material + **piece-square tables** (Simplified Evaluation Function) with **tapered eval** (king PST interpolates linearly between middlegame safety and endgame centralization by non-pawn phase), **safe mobility** (per-piece weighted attack squares excluding enemy pawn attacks), **passed pawns** (separate MG/EG rank bonuses via precomputed masks), and a **bishop pair** bonus. Incremental PSQ so the hot path pays no per-piece loop.
 - Search: **iterative-deepening negamax** with alpha-beta + **quiescence** (captures + promotions, in-check evasion, SEE-pruned) + **aspiration windows** (±75 cp, doubling on fail) + **Zobrist-hashed TT** (~1M entries, EXACT/LOWER/UPPER, mate-score ply-adjusted) + **PVS** (root and internal) + **null-window LMR** + **null-move pruning** (R=3, zugzwang-guarded) + **check extensions** + **reverse futility** + **razoring** + **SEE**-scored capture/promotion ordering (winning above killers, losing below) + **killer moves** + **history heuristic** (capped) + **repetition + 50-move** draw detection. Startpos reaches depth 10 in ~27 ms / ~301k nodes with a full 10-ply PV.
-- **NNUE evaluation** — HalfKP → 256 → 1 architecture with a per-`Position` **incremental accumulator** (per-side dirty flags on king moves; non-king pieces update in O(features-per-piece) via `put_piece`/`remove_piece` hooks). **SIMD kernels** for the three hot loops — NEON on AArch64 (Apple Silicon), AVX2 on x86-64, scalar reference always compiled and pinned by SIMD-vs-reference equivalence tests. Custom **JNN1** binary file format (~20 MiB) with header validation. Off by default — enabled per-run via UCI `UseNNUE` + `EvalFile`; a companion **Python training pipeline** (`training/`, uv-scripts) turns self-play data into a loadable network.
+- **NNUE evaluation** — HalfKP → 512 → 1 architecture with a per-`Position` **incremental accumulator** (per-side dirty flags on king moves; non-king pieces update in O(features-per-piece) via `put_piece`/`remove_piece` hooks). **SIMD kernels** for the three hot loops — NEON on AArch64 (Apple Silicon), AVX2 on x86-64, scalar reference always compiled and pinned by SIMD-vs-reference equivalence tests. Custom **JNN1** binary file format (~40 MiB) with header validation. Off by default — enabled per-run via UCI `UseNNUE` + `EvalFile`; a companion **Python training pipeline** (`training/`, uv-scripts) turns self-play data into a loadable network.
 - UCI protocol (`uci`, `isready`, `ucinewgame`, `position [startpos | fen ...] [moves ...]`, `go` with `depth`/`movetime`/`wtime`/`btime`/`winc`/`binc`/`movestogo`/`infinite`, `stop`, `d`, `quit`) on a background `std::thread`; per-iteration `info` lines emit `depth score cp nodes nps time pv <full line walked from the TT>`; `ucinewgame` clears the TT; `go infinite` runs asynchronously; sending `position` mid-search surfaces an `info string` before canceling. UCI `option` block exposes `UseNNUE` (check) + `EvalFile` (string) for enabling NNUE and pointing at a `.jnn1` file.
 - doctest unit test suite (180 cases / 274k assertions) compiled with AddressSanitizer + UndefinedBehaviorSanitizer
 
@@ -224,7 +224,7 @@ Everything NNUE is off by default. The pieces are:
 
 | Layer                            | What it does                                                                                                                                                  |
 |----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Runtime** (`src/nnue.*`)       | HalfKP → 256 → 1 forward pass. Per-side accumulator on `Position` with dirty flags for king moves (only the moving side's perspective invalidates).           |
+| **Runtime** (`src/nnue.*`)       | HalfKP → 512 → 1 forward pass. Per-side accumulator on `Position` with dirty flags for king moves (only the moving side's perspective invalidates).           |
 | **SIMD** (`src/nnue_simd.h`)     | NEON kernels for AArch64 (Apple Silicon), AVX2 kernels for x86-64. Scalar reference always compiled; SIMD-vs-reference equivalence is unit-tested.            |
 | **JNN1 format** (`src/nnue.cpp`) | Custom int16 quantized binary — `"JNN1"` magic + `uint32 {version, hidden, features}` header + weights. Header-validated on load; not Stockfish-compatible.   |
 | **Trainer** (`training/`)        | Python `torch` pipeline. Reads `fen;wdl` / `fen\|cp` data → HalfKP encoding → MSE-on-sigmoid loss → AdamW + cosine LR + gradient clip → int16 export.         |
@@ -236,7 +236,7 @@ The network sees the board as two sparse feature vectors — one from White's pe
 
 ### Loading a network at runtime
 
-A default network ships in [`nets/default.jnn1`](nets/default.jnn1) — v7, trained on a Stockfish-labeled 100k-position corpus (see [`nets/README.md`](nets/README.md) for provenance). Enable it per-run:
+A default network ships in [`nets/default.jnn1`](nets/default.jnn1) — v9, trained on a 704k-position Stockfish-labeled corpus at 512 hidden units (see [`nets/README.md`](nets/README.md) for provenance). Enable it per-run:
 
 ```bash
 $ ./engine
@@ -246,9 +246,9 @@ position startpos
 go depth 8
 ```
 
-Order matters — set `EvalFile` before `UseNNUE=true` to avoid a transient `info string UseNNUE=true but no network loaded` warning. The engine logs `nnue: loaded '<path>' (256 hidden units, 41024 features)` on success and emits `info string EvalFile loaded: <path>`. A missing / mistyped / architecture-mismatched file is rejected and the engine keeps whatever eval mode was active before.
+Order matters — set `EvalFile` before `UseNNUE=true` to avoid a transient `info string UseNNUE=true but no network loaded` warning. The engine logs `nnue: loaded '<path>' (512 hidden units, 41024 features)` on success and emits `info string EvalFile loaded: <path>`. A missing / mistyped / architecture-mismatched file is rejected and the engine keeps whatever eval mode was active before.
 
-**Note:** classical eval still outplays the shipped NNUE by ~1000 Elo at `tc=5+0.05` (SPRT measured 1-293-0 for v7 vs classical over 294 games). v7 is a +900 Elo upgrade over the previous shipped net (v4) but the ceiling to classical is further out than any single-corpus training round can cross — likely wants a larger hidden layer and HalfKAv2 features. Enable NNUE for experimentation and continued training; leave it off (the default) for competitive play.
+**Note:** classical eval still outplays the shipped NNUE by ~300 Elo at `tc=5+0.05` (SPRT measured 46-299-17 for v9 vs classical over 362 games — Elo gap +301 ±50). v9 closed the gap by ~686 Elo over v7 (which lost at −987 Elo). The hidden layer bumped 256→512 and the training corpus bumped 100k→704k positions. Enable NNUE for experimentation; competitive play still runs on classical.
 
 ### Training a network
 

@@ -4,7 +4,7 @@ Layout matches `src/nnue.cpp` (`nnue::load_network`):
 
     0x00: 4 bytes  ASCII "JNN1"
     0x04: uint32   format_version (=1)
-    0x08: uint32   hidden_size          (must equal HIDDEN_SIZE = 256)
+    0x08: uint32   hidden_size          (must equal HIDDEN_SIZE = 512)
     0x0C: uint32   total_features       (must equal TOTAL_FEATURES = 41024)
     0x10+: int16   feature_biases[HIDDEN_SIZE]
            int16   feature_weights[TOTAL_FEATURES][HIDDEN_SIZE]
@@ -26,7 +26,7 @@ import numpy as np
 
 MAGIC = b"JNN1"
 FORMAT_VERSION = 1
-HIDDEN_SIZE = 256
+HIDDEN_SIZE = 512
 TOTAL_FEATURES = 41024
 
 # Quantization scales. Product must equal 8192 to match the C++
