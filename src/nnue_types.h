@@ -11,7 +11,7 @@
 
 namespace nnue {
 
-constexpr int HIDDEN_SIZE       = 256;
+constexpr int HIDDEN_SIZE       = 512;
 constexpr int PIECES_PER_SIDE   = 5;    // pawn, knight, bishop, rook, queen (king excluded)
 constexpr int FEATURES_PER_KING = 641;  // 64 squares × 10 piece slots + 1 padding
 constexpr int TOTAL_FEATURES    = 64 * FEATURES_PER_KING;

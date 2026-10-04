@@ -1,6 +1,6 @@
 # NNUE training pipeline
 
-Python trainer for the engine's HalfKP → 256 → 1 network. Produces
+Python trainer for the engine's HalfKP → 512 → 1 network. Produces
 `.jnn1` files that the engine loads via the `EvalFile` UCI option.
 
 ## Requirements
@@ -151,5 +151,8 @@ verified end-to-end during the training-pipeline PR (#43).
 - No GPU-specific optimizations (works on CPU or CUDA if available).
 - No incremental training / checkpointing — every run trains from
   scratch. Add if you plan multi-day training runs.
-- Fixed HalfKP → 256 → 1 architecture. Changing hidden size means
-  changing the C++ runtime constants too (`nnue_types.h`).
+- Fixed HalfKP → 512 → 1 architecture. Changing hidden size means
+  bumping the `HIDDEN_SIZE` constant in **three** places that must
+  stay in sync: `src/nnue_types.h`, `training/model.py`,
+  `training/export.py`. The C++ loader rejects architecture
+  mismatches at load time with a clear diagnostic.
