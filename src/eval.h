@@ -40,22 +40,23 @@ struct TuningParams {
     // 0 (NO_PIECE_TYPE) and 6 (KING) stay 0 — the king has no material
     // value (losing it means the game is already lost), and no-piece is
     // a sentinel. Kaufman classical values elsewhere.
-    int piece_values[NUM_PIECE_TYPES] = { 0, 100, 320, 330, 500, 900, 0 };
+    int piece_values[NUM_PIECE_TYPES] = { 0, 92, 301, 297, 488, 943, 0 };
 
-    // Non-PSQ terms.
-    int isolated_mg                 = -15;
-    int isolated_eg                 = -20;
-    int doubled_mg                  = -10;
-    int doubled_eg                  = -20;
-    int bishop_pair_mg              =  30;
-    int bishop_pair_eg              =  50;
+    // Non-PSQ terms. Values tuned via `./engine tune ... all 5000` on
+    // 107k WDL-labeled self-play positions (Oct 2026, PR #72).
+    int isolated_mg                 = -16;
+    int isolated_eg                 = -10;
+    int doubled_mg                  =  -2;
+    int doubled_eg                  =  -9;
+    int bishop_pair_mg              =  41;
+    int bishop_pair_eg              =  67;
     int mob_knight                  =   4;
-    int mob_bishop                  =   3;
-    int mob_rook                    =   2;
-    int mob_queen                   =   1;
-    int shield_missing_penalty      =  12;
-    int king_open_file_penalty      =  30;
-    int king_semi_open_file_penalty =  15;
+    int mob_bishop                  =   7;
+    int mob_rook                    =   8;
+    int mob_queen                   =   4;
+    int shield_missing_penalty      =  24;
+    int king_open_file_penalty      =  24;
+    int king_semi_open_file_penalty =  20;
 };
 extern TuningParams params;
 }  // namespace eval
