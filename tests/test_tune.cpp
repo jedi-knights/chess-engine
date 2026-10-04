@@ -95,10 +95,11 @@ TEST_CASE("dump_weights produces paste-ready output covering all tunable state")
     CHECK(out.find("eval::pst_mg") != std::string::npos);
     CHECK(out.find("eval::pst_eg") != std::string::npos);
 
-    // One representative value from each block. Defaults must appear
-    // verbatim so the dump round-trips: parse back to same weights.
-    CHECK(out.find("bishop_pair_mg              =   30;") != std::string::npos);
-    CHECK(out.find("king_open_file_penalty      =   30;") != std::string::npos);
+    // One representative value from each block. Pins updated post-tune
+    // (PR #72); if `./engine tune` is run again, update these to match
+    // the new initializers in src/eval.h (TuningParams).
+    CHECK(out.find("bishop_pair_mg              =   41;") != std::string::npos);
+    CHECK(out.find("king_open_file_penalty      =   24;") != std::string::npos);
 
     // Per-piece labels inside the PST dump.
     CHECK(out.find("// PAWN") != std::string::npos);
