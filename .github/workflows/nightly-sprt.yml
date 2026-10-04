@@ -97,12 +97,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/fastchess-bin
-          key: fastchess-v1.4.0-ubuntu-latest
+          key: fastchess-v1.8.2-alpha-ubuntu-latest
 
       - name: Build fastchess (from source, cached)
         if: steps.cache-fastchess.outputs.cache-hit != 'true'
         run: |
-          git clone --depth=1 --branch=v1.4.0 \
+          # Upstream Disservin/fastchess only ships `-alpha` tags; original
+          # workflow pinned a non-existent `v1.4.0`. Bumped to current
+          # latest `v1.8.2-alpha` (Oct 2026). The cache key above must
+          # bump in lockstep with this tag or the cached binary from the
+          # old version would be reused.
+          git clone --depth=1 --branch=v1.8.2-alpha \
               https://github.com/Disservin/fastchess.git /tmp/fastchess
           cd /tmp/fastchess
           make -j"$(nproc)"
