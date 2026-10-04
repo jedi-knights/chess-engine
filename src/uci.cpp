@@ -27,6 +27,14 @@ std::atomic<bool> g_stop{false};
 std::thread       g_search_thread;
 std::mutex        g_out_mutex;
 
+// Lazy SMP plumbing — stored but not yet consumed. When search_iterative
+// grows multi-threaded support (future PR), it will read this value to
+// decide how many worker threads to launch. Default 1 preserves current
+// single-threaded behavior exactly. Bounded on parse to [1, 128] so a
+// stray `setoption name Threads value 999` can't torpedo the host.
+std::atomic<int>  g_num_threads{1};
+constexpr int     THREADS_MAX = 128;
+
 // Send a chunk of output atomically. All writes to `out` (main-thread
 // commands AND background info/bestmove lines) go through this so an
 // info line never gets interleaved with an isready reply.
@@ -78,6 +86,7 @@ void cmd_uci(std::ostream& out) {
          "option name EvalFile type string default <empty>\n"
          "option name UCI_Chess960 type check default false\n"
          "option name UCI_Variant type string default chess\n"
+         "option name Threads type spin default 1 min 1 max 128\n"
          "uciok\n");
 }
 
@@ -117,6 +126,22 @@ void cmd_setoption(std::istringstream& is, Position& pos, std::ostream& out) {
     } else if (name == "UCI_Chess960") {
         const bool on = (value == "true" || value == "True" || value == "1");
         pos.is_chess960 = on;
+    } else if (name == "Threads") {
+        // Lazy SMP plumbing — stored for future use by search_iterative.
+        // No worker threads are launched yet (single-threaded search
+        // behavior preserved); the UCI handshake just acknowledges the
+        // option so GUIs that drive the setting (lichess-bot, cutechess,
+        // ChessBase) don't error on "unknown option." Clamp to a sane
+        // range so a stray value can't DoS the host when the actual
+        // thread-pool lands.
+        try {
+            int n = std::stoi(value);
+            if (n < 1) { n = 1; }
+            if (n > THREADS_MAX) { n = THREADS_MAX; }
+            g_num_threads.store(n, std::memory_order_relaxed);
+        } catch (...) {
+            // Unparseable value — leave g_num_threads unchanged.
+        }
     } else if (name == "UCI_Variant") {
         // Lichess sends the variant key as the value: "chess",
         // "kingofthehill", "threecheck", "antichess", "atomic",
