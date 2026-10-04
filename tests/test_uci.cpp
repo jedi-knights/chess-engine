@@ -30,6 +30,28 @@ TEST_CASE("uci handshake identifies the engine and terminates with uciok") {
     CHECK(contains(out, "id name jedi-engine"));
     CHECK(contains(out, "id author"));
     CHECK(contains(out, "uciok"));
+    // Advertised options — regression guard so a future refactor doesn't
+    // silently drop one and leave GUIs with no way to flip the knob.
+    CHECK(contains(out, "option name UseNNUE"));
+    CHECK(contains(out, "option name EvalFile"));
+    CHECK(contains(out, "option name UCI_Chess960"));
+    CHECK(contains(out, "option name UCI_Variant"));
+    CHECK(contains(out, "option name Threads type spin default 1 min 1 max 128"));
+}
+
+TEST_CASE("setoption Threads parses sane values; invalid input is a no-op") {
+    // The option is plumbed but search_iterative doesn't yet consume it —
+    // just verify setoption doesn't crash and the handshake reports the
+    // option. Full behavior tests land with the Lazy SMP implementation PR.
+    CHECK(contains(run_session("setoption name Threads value 4\nuci\nquit\n"),
+                   "uciok"));
+    CHECK(contains(run_session("setoption name Threads value abc\nuci\nquit\n"),
+                   "uciok"));
+    // Out-of-range values are clamped silently; no crash.
+    CHECK(contains(run_session("setoption name Threads value 9999\nuci\nquit\n"),
+                   "uciok"));
+    CHECK(contains(run_session("setoption name Threads value 0\nuci\nquit\n"),
+                   "uciok"));
 }
 
 TEST_CASE("isready responds with readyok") {
