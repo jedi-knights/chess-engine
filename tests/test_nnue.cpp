@@ -458,6 +458,165 @@ TEST_CASE("NNUE SIMD forward_side matches reference") {
     }
 }
 
+TEST_CASE("NNUE Finny cache: warm-path refresh matches full recompute") {
+    // Exercise the warm path: visit king_sq A, then B, then back to A.
+    // The second visit to A must bitboard-diff the current layout
+    // against the cached layout and land on the same accumulator as
+    // a fresh recompute. If the cache's piece-snapshot update ever
+    // drifted, this would catch it.
+    NnueScope scope;
+    install_patterned_network();
+
+    Position pos_a;
+    REQUIRE(pos_a.set_from_fen(
+        "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"));
+    nnue::force_refresh_accumulator(pos_a);  // cold → populate (E1, E8) entries
+
+    // White king E1→F1 (castling rights clear). Alternate turns.
+    UndoInfo u1;
+    pos_a.make_move(make_move(E1, F1), u1);
+    nnue::refresh_accumulator(pos_a);        // cold-populates (F1) entry
+
+    // Black waiting move E8→D8 (and refresh).
+    UndoInfo u2;
+    pos_a.make_move(make_move(E8, D8), u2);
+    nnue::refresh_accumulator(pos_a);        // cold-populates (D8) entry
+
+    // White king back F1→E1 — triggers WARM refresh of (E1) entry.
+    // Board layout matches the pre-move layout except for black
+    // king now at D8 instead of E8.
+    UndoInfo u3;
+    pos_a.make_move(make_move(F1, E1), u3);
+    nnue::refresh_accumulator(pos_a);
+
+    // Fresh recompute of the same ending position.
+    Position pos_fresh;
+    REQUIRE(pos_fresh.set_from_fen(
+        "r2k3r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R b kq - 3 2"));
+    nnue::force_refresh_accumulator(pos_fresh);
+
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            CHECK(pos_a.acc.values[c][i] == pos_fresh.acc.values[c][i]);
+        }
+    }
+}
+
+TEST_CASE("NNUE Finny cache: warm refresh with non-trivial piece diff") {
+    // King returns to a square where it was previously, BUT the piece
+    // layout differs — a pawn has advanced. The warm path must apply
+    // one add (pawn at new sq) and one sub (pawn at old sq) and land
+    // on the correct accumulator.
+    NnueScope scope;
+    install_patterned_network();
+
+    Position p;
+    REQUIRE(p.set_from_fen("4k3/8/8/8/8/8/P7/4K3 w - - 0 1"));
+    nnue::force_refresh_accumulator(p);  // populates E1 entry
+
+    UndoInfo u1;
+    p.make_move(make_move(E1, D1), u1);
+    nnue::refresh_accumulator(p);
+    // Black to move — push a pawn down the board. a2 doesn't matter
+    // because black doesn't have a pawn there. Make black move king.
+    UndoInfo u2;
+    p.make_move(make_move(E8, E7), u2);
+    nnue::refresh_accumulator(p);
+    // White advances a2→a3; still white king on D1 — doesn't touch
+    // the Finny E1 entry we're about to re-visit.
+    UndoInfo u3;
+    p.make_move(make_move(A2, A3), u3);
+    nnue::refresh_accumulator(p);
+    // Return white king to E1 — WARM refresh with pawn on a3 vs
+    // cached a2.
+    UndoInfo u4;
+    p.make_move(make_move(E7, E8), u4);  // black king back
+    nnue::refresh_accumulator(p);
+    UndoInfo u5;
+    p.make_move(make_move(D1, E1), u5);
+    nnue::refresh_accumulator(p);
+
+    Position fresh;
+    REQUIRE(fresh.set_from_fen("4k3/8/8/8/8/P7/8/4K3 b - - 3 3"));
+    nnue::force_refresh_accumulator(fresh);
+
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+            CHECK(p.acc.values[c][i] == fresh.acc.values[c][i]);
+        }
+    }
+}
+
+TEST_CASE("NNUE SIMD apply_deltas matches reference") {
+    // Equivalence check across a mix of (n_add, n_sub) counts covering
+    // the realistic cases: quiet (1a 1s), capture (1a 2s), capture-promo
+    // (1a 2s), castling (2a 2s), and the empty / max-fanout edges.
+    const int cases[][2] = {
+        {0, 0}, {1, 0}, {0, 1}, {1, 1}, {1, 2}, {2, 2}, {4, 4}, {8, 8},
+    };
+    for (uint32_t seed = 1; seed <= 6; ++seed) {
+        for (const auto& cs : cases) {
+            const int n_add = cs[0];
+            const int n_sub = cs[1];
+            Lcg rng(seed * 0xA3C7F19DU + uint32_t(n_add * 31 + n_sub));
+            std::array<int32_t, nnue::HIDDEN_SIZE> acc_a{}, acc_b{};
+            std::array<std::array<int16_t, nnue::HIDDEN_SIZE>,
+                       nnue::AccumulatorBatch::MAX_DELTAS> add_cols{}, sub_cols{};
+            const int16_t* adds[nnue::AccumulatorBatch::MAX_DELTAS] = {};
+            const int16_t* subs[nnue::AccumulatorBatch::MAX_DELTAS] = {};
+            for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+                acc_a[i] = acc_b[i] = rng.next_i32();
+            }
+            for (int d = 0; d < n_add; ++d) {
+                for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+                    add_cols[d][i] = rng.next_i16();
+                }
+                adds[d] = add_cols[d].data();
+            }
+            for (int d = 0; d < n_sub; ++d) {
+                for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+                    sub_cols[d][i] = rng.next_i16();
+                }
+                subs[d] = sub_cols[d].data();
+            }
+            nnue::simd::apply_deltas(acc_a.data(), adds, n_add, subs, n_sub);
+            nnue::simd::reference::apply_deltas(acc_b.data(), adds, n_add, subs, n_sub);
+            for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+                CHECK(acc_a[i] == acc_b[i]);
+            }
+        }
+    }
+}
+
+TEST_CASE("NNUE batched flush matches sequential add/sub") {
+    // apply_deltas with N adds + M subs must produce the same result
+    // as calling add_column N times then sub_column M times. Guards
+    // against the fused-pass kernel diverging from the single-op
+    // kernels in some corner the equivalence-via-make-move tests
+    // might miss.
+    Lcg rng(0x1234ABCDU);
+    std::array<int32_t, nnue::HIDDEN_SIZE> acc_batched{}, acc_sequential{};
+    std::array<std::array<int16_t, nnue::HIDDEN_SIZE>, 4> cols{};
+    for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+        acc_batched[i] = acc_sequential[i] = rng.next_i32();
+    }
+    for (auto& col : cols) {
+        for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) { col[i] = rng.next_i16(); }
+    }
+    const int16_t* adds[] = { cols[0].data(), cols[1].data() };
+    const int16_t* subs[] = { cols[2].data(), cols[3].data() };
+    nnue::simd::apply_deltas(acc_batched.data(), adds, 2, subs, 2);
+
+    nnue::simd::add_column(acc_sequential.data(), cols[0].data());
+    nnue::simd::add_column(acc_sequential.data(), cols[1].data());
+    nnue::simd::sub_column(acc_sequential.data(), cols[2].data());
+    nnue::simd::sub_column(acc_sequential.data(), cols[3].data());
+
+    for (int i = 0; i < nnue::HIDDEN_SIZE; ++i) {
+        CHECK(acc_batched[i] == acc_sequential[i]);
+    }
+}
+
 TEST_CASE("NNUE SIMD forward_side handles clipping boundary exactly") {
     // Every clip-relevant value: below (-1), at zero, mid (63), at
     // upper clip (127), above upper clip (128, 32767).

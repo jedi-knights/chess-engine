@@ -21,6 +21,52 @@ bool                     g_loaded = false;
 bool                     g_use_nnue = false;
 std::unique_ptr<Network> g_network;
 
+// Finny table (accumulator refresh cache). One entry per
+// (perspective, king_square). Each entry caches an accumulator
+// value AND the per-(color, piece-type) bitboards that produced it.
+// On a dirty-side refresh, we hit the entry for the current king
+// square, bitboard-diff against the cached layout, and apply only
+// the pieces that changed — typically a handful rather than ~30.
+//
+// Cold entries (first visit to a king square) do a full populate,
+// identical cost to the old refresh_side. The win is in search,
+// where king squares get revisited constantly and the warm-entry
+// delta is usually 0-4 pieces.
+//
+// Invariant: when `initialized`, `pieces` is the exact piece layout
+// used to compute `values` for the entry's (perspective, king_sq).
+// Cache is a pure function of (perspective, king_sq, piece layout,
+// network weights) — invalidated only when the network is reloaded.
+constexpr int MAX_FINNY_DELTAS = 64;  // 32 pieces × 2 (adds+subs) bound
+struct FinnyEntry {
+    std::array<int32_t, HIDDEN_SIZE> values{};
+    Bitboard pieces[NUM_COLORS][NUM_PIECE_TYPES] = {};
+    bool initialized = false;
+};
+// Heap-allocated so the ~276 KiB table doesn't bloat the BSS of any
+// TU that transitively pulls in nnue_types.h. unique_ptr with the
+// network itself — paired lifetime, cleared together.
+std::unique_ptr<FinnyEntry[]> g_finny;  // sized NUM_COLORS * NUM_SQUARES
+
+FinnyEntry& finny_entry(Color persp, Square king_sq) {
+    return g_finny[int(persp) * NUM_SQUARES + int(king_sq)];
+}
+
+void clear_finny() {
+    if (!g_finny) {
+        g_finny = std::make_unique<FinnyEntry[]>(NUM_COLORS * NUM_SQUARES);
+        return;
+    }
+    for (int i = 0; i < NUM_COLORS * NUM_SQUARES; ++i) {
+        g_finny[i].initialized = false;
+        for (int c = 0; c < NUM_COLORS; ++c) {
+            for (int pt = 0; pt < NUM_PIECE_TYPES; ++pt) {
+                g_finny[i].pieces[c][pt] = 0;
+            }
+        }
+    }
+}
+
 // Piece → 0..9 slot per HalfKP:
 //   { own pawn, own knight, own bishop, own rook, own queen,
 //     enemy pawn, enemy knight, enemy bishop, enemy rook, enemy queen }
@@ -51,35 +97,87 @@ int feature_index(Color perspective, Square king_sq, Square piece_sq,
 
 namespace {
 
-// Recompute one side's accumulator from scratch. Reads current
-// board state via bitboards; kings themselves excluded from the
-// feature sum (HalfKP: king square is the reference, not a feature).
-// No-op when the friendly king isn't on the board (artificial test
-// positions).
+// Rebuild one side's accumulator through the Finny table.
+//
+// Cold entry (first time this king square is seen since the network
+// was loaded): initialize entry.values from biases, sum every piece's
+// feature column, and snapshot the piece bitboards. Cost identical to
+// the old full recompute.
+//
+// Warm entry: bitboard-diff cached vs current per (color, piece-type);
+// collect add-columns for new pieces and sub-columns for departed
+// pieces; apply them in one fused pass via apply_deltas. In practice
+// the delta is usually 0-4 pieces when a king returns to a visited
+// square during search, so this is near-free vs the full recompute.
+//
+// After either path, memcpy the entry's values into acc.values and
+// mark the side computed. No-op when the friendly king isn't on the
+// board (artificial test positions): accumulator initialized to biases.
 void refresh_side(const ::Position& pos, Accumulator& acc, Color persp) {
-    // Bias initialization: int16 biases widened element-wise into
-    // int32 accumulator slots.
-    for (int i = 0; i < HIDDEN_SIZE; ++i) {
-        acc.values[persp][i] = g_network->feature_biases[i];
-    }
     const Bitboard king_bb = pos.pieces[persp][KING];
     if (king_bb == 0U) {
+        for (int i = 0; i < HIDDEN_SIZE; ++i) {
+            acc.values[persp][i] = g_network->feature_biases[i];
+        }
         acc.computed[persp] = true;
         return;
     }
     const Square king_sq = lsb(king_bb);
-    for (int pc = 0; pc < NUM_COLORS; ++pc) {
-        for (int pt = PAWN; pt <= QUEEN; ++pt) {
-            Bitboard b = pos.pieces[pc][pt];
-            while (b != 0U) {
-                const Square s = pop_lsb(b);
-                const int idx = feature_index(
-                    persp, king_sq, s, PieceType(pt), Color(pc));
-                simd::add_column(acc.values[persp].data(),
-                                 g_network->feature_weights[idx].data());
+    FinnyEntry& entry = finny_entry(persp, king_sq);
+
+    if (!entry.initialized) {
+        for (int i = 0; i < HIDDEN_SIZE; ++i) {
+            entry.values[i] = g_network->feature_biases[i];
+        }
+        for (int pc = 0; pc < NUM_COLORS; ++pc) {
+            for (int pt = PAWN; pt <= QUEEN; ++pt) {
+                entry.pieces[pc][pt] = pos.pieces[pc][pt];
+                Bitboard b = pos.pieces[pc][pt];
+                while (b != 0U) {
+                    const Square s = pop_lsb(b);
+                    const int idx = feature_index(
+                        persp, king_sq, s, PieceType(pt), Color(pc));
+                    simd::add_column(entry.values.data(),
+                                     g_network->feature_weights[idx].data());
+                }
             }
         }
+        entry.initialized = true;
+    } else {
+        const int16_t* adds[MAX_FINNY_DELTAS];
+        const int16_t* subs[MAX_FINNY_DELTAS];
+        int n_add = 0;
+        int n_sub = 0;
+        for (int pc = 0; pc < NUM_COLORS; ++pc) {
+            for (int pt = PAWN; pt <= QUEEN; ++pt) {
+                const Bitboard cur     = pos.pieces[pc][pt];
+                const Bitboard cached  = entry.pieces[pc][pt];
+                Bitboard       added   = cur    & ~cached;
+                Bitboard       removed = cached & ~cur;
+                while (added != 0U) {
+                    const Square s = pop_lsb(added);
+                    const int idx = feature_index(
+                        persp, king_sq, s, PieceType(pt), Color(pc));
+                    assert(n_add < MAX_FINNY_DELTAS);
+                    adds[n_add++] = g_network->feature_weights[idx].data();
+                }
+                while (removed != 0U) {
+                    const Square s = pop_lsb(removed);
+                    const int idx = feature_index(
+                        persp, king_sq, s, PieceType(pt), Color(pc));
+                    assert(n_sub < MAX_FINNY_DELTAS);
+                    subs[n_sub++] = g_network->feature_weights[idx].data();
+                }
+                entry.pieces[pc][pt] = cur;
+            }
+        }
+        if (n_add + n_sub > 0) {
+            simd::apply_deltas(entry.values.data(), adds, n_add, subs, n_sub);
+        }
     }
+
+    std::memcpy(acc.values[persp].data(), entry.values.data(),
+                sizeof(entry.values));
     acc.computed[persp] = true;
 }
 
@@ -108,14 +206,21 @@ void force_refresh_accumulator(const ::Position& pos) {
 // Add / subtract a piece's feature column from both perspectives'
 // accumulators. Called from Position::put_piece / remove_piece
 // exclusively — bypasses the dirty check because the caller has
-// already handled the king case. If either perspective is currently
-// dirty the update is technically wasted work (refresh will rebuild
-// from scratch anyway), but that's cheap enough to just do
-// unconditionally rather than branch per side.
+// already handled the king case. A dirty perspective is skipped
+// because refresh_side will overwrite the entire array on next
+// evaluate() — spending SIMD cycles on a value about to be
+// discarded is pure waste in the search hot path.
 void add_piece_to_accumulator(const ::Position& pos, Accumulator& acc,
                               Square sq, PieceType pt, Color piece_color) {
     if (!g_loaded) { return; }
+    if (acc.batch.active) {
+        assert(acc.batch.n < AccumulatorBatch::MAX_DELTAS);
+        acc.batch.deltas[acc.batch.n++] = {
+            +1, std::uint8_t(sq), std::uint8_t(pt), std::uint8_t(piece_color)};
+        return;
+    }
     for (int c = 0; c < NUM_COLORS; ++c) {
+        if (!acc.computed[c]) { continue; }
         const Color persp   = Color(c);
         const Bitboard kbb  = pos.pieces[persp][KING];
         if (kbb == 0U) { continue; }
@@ -129,7 +234,14 @@ void add_piece_to_accumulator(const ::Position& pos, Accumulator& acc,
 void sub_piece_from_accumulator(const ::Position& pos, Accumulator& acc,
                                 Square sq, PieceType pt, Color piece_color) {
     if (!g_loaded) { return; }
+    if (acc.batch.active) {
+        assert(acc.batch.n < AccumulatorBatch::MAX_DELTAS);
+        acc.batch.deltas[acc.batch.n++] = {
+            -1, std::uint8_t(sq), std::uint8_t(pt), std::uint8_t(piece_color)};
+        return;
+    }
     for (int c = 0; c < NUM_COLORS; ++c) {
+        if (!acc.computed[c]) { continue; }
         const Color persp   = Color(c);
         const Bitboard kbb  = pos.pieces[persp][KING];
         if (kbb == 0U) { continue; }
@@ -138,6 +250,43 @@ void sub_piece_from_accumulator(const ::Position& pos, Accumulator& acc,
         simd::sub_column(acc.values[c].data(),
                          g_network->feature_weights[idx].data());
     }
+}
+
+void begin_batch(Accumulator& acc) {
+    assert(!acc.batch.active);
+    acc.batch.n      = 0;
+    acc.batch.active = true;
+}
+
+void end_batch(const ::Position& pos, Accumulator& acc) {
+    assert(acc.batch.active);
+    acc.batch.active = false;
+    if (!g_loaded || acc.batch.n == 0) {
+        acc.batch.n = 0;
+        return;
+    }
+    const int16_t* adds[AccumulatorBatch::MAX_DELTAS];
+    const int16_t* subs[AccumulatorBatch::MAX_DELTAS];
+    for (int c = 0; c < NUM_COLORS; ++c) {
+        if (!acc.computed[c]) { continue; }
+        const Color    persp   = Color(c);
+        const Bitboard kbb     = pos.pieces[persp][KING];
+        if (kbb == 0U) { continue; }
+        const Square king_sq = lsb(kbb);
+        int n_add = 0;
+        int n_sub = 0;
+        for (int i = 0; i < acc.batch.n; ++i) {
+            const auto& d = acc.batch.deltas[i];
+            const int idx = feature_index(persp, king_sq,
+                                          Square(d.sq), PieceType(d.pt),
+                                          Color(d.pc));
+            const int16_t* col = g_network->feature_weights[idx].data();
+            if (d.sign > 0) { adds[n_add++] = col; }
+            else            { subs[n_sub++] = col; }
+        }
+        simd::apply_deltas(acc.values[c].data(), adds, n_add, subs, n_sub);
+    }
+    acc.batch.n = 0;
 }
 
 bool is_loaded() { return g_loaded; }
@@ -239,6 +388,11 @@ bool load_network(const std::string& path) {
 
     g_network = std::move(net);
     g_loaded = true;
+    // Finny cache is a function of the loaded weights; a new load
+    // means every entry is stale. clear_finny lazily allocates the
+    // 276 KiB table on first load so engines that never enable NNUE
+    // don't pay the memory cost.
+    clear_finny();
     std::fprintf(stderr, "nnue: loaded '%s' (%d hidden units, %d features)\n",
                  path.c_str(), HIDDEN_SIZE, TOTAL_FEATURES);
     return true;
@@ -302,9 +456,12 @@ int evaluate(const ::Position& pos) {
                               g_network->output_weights.data());
     sum += simd::forward_side(pos.acc.values[opp].data(),
                               g_network->output_weights.data() + HIDDEN_SIZE);
-    // Standard NNUE output scale: divide by 16 * 512 = 8192 to bring
-    // integer accumulator back to centipawn range. Zeroed network
-    // means sum = bias = 0, so scale factor is a placeholder.
+    // Dequantize: training-side scales SCALE_FEATURES=128 (float
+    // feature weight → int16) and SCALE_OUTPUT=64 (float output
+    // weight → int16); their product is the integer-to-centipawn
+    // divisor. See training/README.md's "Quantization" section —
+    // these three constants must stay in sync. Changing any of them
+    // means retraining or an on-disk format bump.
     return int(sum / 8192);
 }
 
