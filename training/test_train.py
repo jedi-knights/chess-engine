@@ -33,11 +33,13 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+from export import SCALE_FEATURES, SCALE_OUTPUT  # noqa: E402
 from model import NNUE  # noqa: E402
 from train import (  # noqa: E402
     build_optimizer,
     build_scheduler,
     clip_gradients,
+    clip_quantization_weights,
 )
 
 
@@ -137,11 +139,104 @@ def test_clip_gradients_zero_disables_clip() -> None:
     )
 
 
+def test_clip_quantization_weights_bounds_feature_weights() -> None:
+    """Feature weights must satisfy `|w| * SCALE_FEATURES < 32768` after clipping.
+
+    Guards the exporter's int16 saturation path: a weight that
+    saturates round-trips lossily, so the on-disk net no longer
+    matches the trained one. Clipping during training makes the
+    guarantee hold by construction instead of relying on
+    regularization keeping weights small.
+    """
+    # Arrange
+    model = NNUE()
+    # Spike every feature weight to a value that would saturate after
+    # scaling by 128 — magnitude 400 × 128 = 51200 > 32767.
+    with torch.no_grad():
+        model.feature_weights.weight.fill_(400.0)
+        model.feature_bias.fill_(-400.0)
+
+    # Act
+    clip_quantization_weights(model)
+
+    # Assert
+    peak_fw = model.feature_weights.weight.detach().abs().max().item()
+    peak_fb = model.feature_bias.detach().abs().max().item()
+    assert peak_fw * SCALE_FEATURES < 32768, (
+        f"feature_weights peak {peak_fw} would saturate at scale {SCALE_FEATURES}"
+    )
+    assert peak_fb * SCALE_FEATURES < 32768, (
+        f"feature_bias peak {peak_fb} would saturate at scale {SCALE_FEATURES}"
+    )
+
+
+def test_clip_quantization_weights_bounds_output_layer() -> None:
+    """Output weights/bias must respect their respective quantization scales.
+
+    `output.weight` is scaled by `SCALE_OUTPUT`; `output.bias` is
+    scaled by the full `SCALE_FEATURES * SCALE_OUTPUT = 8192` product
+    because it contributes to the pre-divisor sum.
+    """
+    # Arrange
+    model = NNUE()
+    with torch.no_grad():
+        model.output.weight.fill_(1000.0)
+        model.output.bias.fill_(1000.0)
+
+    # Act
+    clip_quantization_weights(model)
+
+    # Assert
+    peak_ow = model.output.weight.detach().abs().max().item()
+    peak_ob = model.output.bias.detach().abs().max().item()
+    assert peak_ow * SCALE_OUTPUT < 32768, (
+        f"output.weight peak {peak_ow} would saturate at scale {SCALE_OUTPUT}"
+    )
+    assert peak_ob * SCALE_FEATURES * SCALE_OUTPUT < 32768, (
+        f"output.bias peak {peak_ob} would saturate at scale 8192"
+    )
+
+
+def test_clip_quantization_weights_preserves_in_range_values() -> None:
+    """A weight already inside its quantization bound must not be modified.
+
+    Clipping is a defensive upper-bound guardrail — it must not shrink
+    the trainable range for weights that have been kept small by
+    regularization. Checking a magnitude well inside every bound guards
+    against an over-aggressive clamp that would collapse the optimizer's
+    search space.
+    """
+    # Arrange
+    model = NNUE()
+    with torch.no_grad():
+        model.feature_weights.weight.fill_(0.03)
+        model.feature_bias.fill_(0.03)
+        model.output.weight.fill_(0.05)
+        model.output.bias.fill_(0.01)
+
+    # Act
+    clip_quantization_weights(model)
+
+    # Assert
+    assert torch.allclose(
+        model.feature_weights.weight,
+        torch.full_like(model.feature_weights.weight, 0.03),
+    )
+    assert torch.allclose(model.feature_bias, torch.full_like(model.feature_bias, 0.03))
+    assert torch.allclose(
+        model.output.weight, torch.full_like(model.output.weight, 0.05)
+    )
+    assert torch.allclose(model.output.bias, torch.full_like(model.output.bias, 0.01))
+
+
 TESTS = [
     test_build_optimizer_returns_adamw_with_weight_decay,
     test_build_scheduler_warms_up_then_decays,
     test_clip_gradients_caps_large_norm,
     test_clip_gradients_zero_disables_clip,
+    test_clip_quantization_weights_bounds_feature_weights,
+    test_clip_quantization_weights_bounds_output_layer,
+    test_clip_quantization_weights_preserves_in_range_values,
 ]
 
 
