@@ -1074,10 +1074,11 @@ SearchResult search_iterative(Position& pos, SearchLimits limits,
     // the window fully.
     // Initial window sized above the typical depth-parity score oscillation
     // (~40 cp on startpos-style positions). Too narrow and we re-search
-    // every iteration; too wide and we lose the pruning benefit. 75 is
-    // conservative for our current eval; larger MAX bounds re-search work
-    // when the score genuinely moves (tactical positions).
-    constexpr int ASPIRATION_INITIAL = 75;
+    // every iteration; too wide and we lose the pruning benefit.
+    // Stockfish-style tighter window (25 cp) traded for more re-searches —
+    // under test vs the 75 cp pre-tune baseline. ASPIRATION_MAX bounds
+    // re-search work when the score genuinely moves (tactical positions).
+    constexpr int ASPIRATION_INITIAL = 25;
     constexpr int ASPIRATION_MAX     = 2000;
 
     for (int d = 1; d <= limits.max_depth; ++d) {
