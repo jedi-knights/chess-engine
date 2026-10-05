@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, random_split
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import SelfplayDataset, collate_batch  # noqa: E402
-from export import export_network  # noqa: E402
+from export import SCALE_FEATURES, SCALE_OUTPUT, export_network  # noqa: E402
 from model import NNUE  # noqa: E402
 
 
@@ -143,6 +143,37 @@ def build_scheduler(
     return LambdaLR(opt, lr_lambda=lr_lambda)
 
 
+def clip_quantization_weights(model: torch.nn.Module) -> None:
+    """Clamp weights in-place to each layer's int16 quantization bound.
+
+    The exporter multiplies float weights by per-layer scales
+    (`SCALE_FEATURES=128` for feature weights/biases, `SCALE_OUTPUT=64`
+    for output weights, their product `8192` for output bias) and
+    truncates to int16. A weight outside the resulting float range
+    saturates on export — the on-disk net then no longer matches the
+    trained one. Calling this after every optimizer step turns the
+    "won't saturate if weights stay small" hope into a construction-
+    time invariant.
+
+    Bounds use a 1-ULP margin against the signed-int16 max (32767):
+    ``round(w * scale)`` with a float exactly at ``32767.5 / scale``
+    may round up to 32768 and overflow. Shrinking by `-1.0 / scale`
+    guarantees ``round`` lands on 32767 or below.
+
+    Args:
+        model: NNUE module whose weights will be clamped.
+    """
+    # Bounds live in export.py so trainer + exporter can't drift.
+    fw_bound = (32767.0 - 1.0) / SCALE_FEATURES
+    ow_bound = (32767.0 - 1.0) / SCALE_OUTPUT
+    ob_bound = (32767.0 - 1.0) / (SCALE_FEATURES * SCALE_OUTPUT)
+    with torch.no_grad():
+        model.feature_weights.weight.clamp_(-fw_bound, fw_bound)
+        model.feature_bias.clamp_(-fw_bound, fw_bound)
+        model.output.weight.clamp_(-ow_bound, ow_bound)
+        model.output.bias.clamp_(-ob_bound, ob_bound)
+
+
 def clip_gradients(model: torch.nn.Module, max_norm: float) -> None:
     """Clip gradients in-place so their total L2 norm is at most `max_norm`.
 
@@ -224,6 +255,12 @@ def _run_epoch(
                 loss.backward()
                 clip_gradients(model, grad_clip)
                 opt.step()
+                # Enforce the int16 quantization bound on every weight
+                # as part of the step itself. Doing this after the
+                # optimizer runs means AdamW's moment estimates see
+                # the pre-clamp gradients; the clamp only trims
+                # weights that would otherwise saturate on export.
+                clip_quantization_weights(model)
 
             total += loss.item() * targets.size(0)
             n_seen += targets.size(0)

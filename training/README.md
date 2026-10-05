@@ -80,11 +80,14 @@ runs without downloading PyTorch:
 - `SCALE_OUTPUT   = 64`  (float weight × 64  → int16)
 - Product = 8192 — matches the divisor in `nnue::evaluate()`.
 
-The exporter warns on int16 saturation (stderr). If it fires,
-either lower the initialization magnitude, regularize weights, or
-add per-layer weight clipping to `training/model.py`. Saturation is
-information-lossy — the model as loaded will differ from the model
-as trained.
+Weights are clamped to the int16-safe range after every optimizer
+step by `clip_quantization_weights` in `train.py`, so the exporter's
+saturation warning should never fire for a model this pipeline
+produced. If it does, it means a weight was fine before `opt.step()`
+and ended up outside the bound AFTER a step — AdamW's update
+exceeded the range in a single step; investigate the LR schedule
+or a pathological batch. Saturation would be information-lossy —
+the model as loaded would differ from the model as trained.
 
 ## Learning from played games
 
