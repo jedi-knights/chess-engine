@@ -502,6 +502,13 @@ void Position::make_move(Move m, UndoInfo& u) {
         key ^= zobrist::EP_FILE[file_of(ep_square)];
     }
 
+    // Batch NNUE deltas across every piece op in this move so the
+    // flush walks the hidden array once per side instead of per op.
+    // Covers captures (3 ops), castling (4 ops), and atomic explosions
+    // (up to 10 ops). King ops still mark dirty inside put/remove —
+    // the batch simply doesn't apply its deltas to a dirty side.
+    nnue::begin_batch(acc);
+
     if (mt == MT_CASTLING) {
         // Internal encoding: from = king_from, to = king_to (G or C file).
         // In FRC any of {king_from, king_to, rook_from, rook_to} may
@@ -611,6 +618,8 @@ void Position::make_move(Move m, UndoInfo& u) {
         }
     }
 
+    nnue::end_batch(*this, acc);
+
     // Castling-rights update: king move clears BOTH of own color's bits
     // (MT_CASTLING implicitly covered because moving is a king);
     // rook-square checks catch a rook moving off its stored starting
@@ -697,6 +706,12 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
         --fullmove_number;
     }
 
+    // Mirror make_move's batched NNUE update across the unmake piece
+    // ops. Correctness invariant: the net sequence of adds/subs on
+    // unmake is the inverse of the make_move sequence, so flushing
+    // at the end restores the pre-move accumulator exactly.
+    nnue::begin_batch(acc);
+
     if (mt == MT_CASTLING) {
         // Mirror make_move's remove-both-then-put-both sequence. The
         // rook starting file is still in castling_rook_file (it never
@@ -776,6 +791,8 @@ void Position::unmake_move(Move m, const UndoInfo& u) {
             else                         promoted &= ~square_bb(to);
         }
     }
+
+    nnue::end_batch(*this, acc);
 
     ep_square      = u.ep_square;
     castling       = u.castling;

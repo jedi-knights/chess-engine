@@ -3,10 +3,16 @@
 
 #include <cstdint>
 
-// SIMD kernels for the three NNUE hot loops:
-//   - add_column:  acc[i] += col[i]           (feature enters)
-//   - sub_column:  acc[i] -= col[i]           (feature leaves)
+// SIMD kernels for the four NNUE hot loops:
+//   - add_column:  acc[i] += col[i]           (feature enters, immediate path)
+//   - sub_column:  acc[i] -= col[i]           (feature leaves, immediate path)
+//   - apply_deltas: fused batched update       (make_move hot path)
 //   - forward_side: sum_i clip(acc[i]) * w[i] (output layer, one side)
+//
+// apply_deltas walks the hidden array ONCE and applies N add columns
+// then M sub columns per chunk — a capture (1 add + 2 sub) becomes
+// one sweep instead of three, keeping the acc slice in a register and
+// the few columns in L1 across every iteration.
 //
 // Each kernel has a NEON build (AArch64), an AVX2 build (x86-64 with
 // AVX2 available), and a scalar reference. The reference lives in
@@ -43,6 +49,21 @@ inline void add_column(int32_t* acc, const int16_t* col) {
 inline void sub_column(int32_t* acc, const int16_t* col) {
     for (int i = 0; i < HIDDEN_SIZE; ++i) {
         acc[i] -= col[i];
+    }
+}
+
+// Batched update: apply all `n_add` add-columns and `n_sub` sub-columns
+// to `acc` in a single pass. Pointer-indirect columns because each
+// delta resolves to a feature-weight row chosen by (perspective, king,
+// piece, color) at flush time.
+inline void apply_deltas(int32_t* acc,
+                         const int16_t* const* adds, int n_add,
+                         const int16_t* const* subs, int n_sub) {
+    for (int i = 0; i < HIDDEN_SIZE; ++i) {
+        int32_t v = acc[i];
+        for (int d = 0; d < n_add; ++d) { v += adds[d][i]; }
+        for (int d = 0; d < n_sub; ++d) { v -= subs[d][i]; }
+        acc[i] = v;
     }
 }
 
@@ -84,6 +105,26 @@ inline void sub_column(int32_t* acc, const int16_t* col) {
         __m256i a    = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + i));
         __m256i diff = _mm256_sub_epi32(a, w32);
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(acc + i), diff);
+    }
+}
+
+// 8 int32 lanes per chunk; keep acc slice in a __m256i register and
+// fold every add/sub column into it before storing back once.
+inline void apply_deltas(int32_t* acc,
+                         const int16_t* const* adds, int n_add,
+                         const int16_t* const* subs, int n_sub) {
+    static_assert(HIDDEN_SIZE % 8 == 0, "AVX2 apply_deltas needs HIDDEN_SIZE % 8 == 0");
+    for (int i = 0; i < HIDDEN_SIZE; i += 8) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + i));
+        for (int d = 0; d < n_add; ++d) {
+            __m128i w16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(adds[d] + i));
+            v = _mm256_add_epi32(v, _mm256_cvtepi16_epi32(w16));
+        }
+        for (int d = 0; d < n_sub; ++d) {
+            __m128i w16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(subs[d] + i));
+            v = _mm256_sub_epi32(v, _mm256_cvtepi16_epi32(w16));
+        }
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(acc + i), v);
     }
 }
 
@@ -151,6 +192,32 @@ inline void sub_column(int32_t* acc, const int16_t* col) {
     }
 }
 
+// 8 int16 → 2 x int32x4 lanes per chunk; fold every column into the
+// per-chunk register pair before storing. vaddw_s16 / vsubw_s16 widen
+// the int16 operand to int32 as part of the add, so columns stay in
+// their natural int16 width and widening happens lane-by-lane.
+inline void apply_deltas(int32_t* acc,
+                         const int16_t* const* adds, int n_add,
+                         const int16_t* const* subs, int n_sub) {
+    static_assert(HIDDEN_SIZE % 8 == 0, "NEON apply_deltas needs HIDDEN_SIZE % 8 == 0");
+    for (int i = 0; i < HIDDEN_SIZE; i += 8) {
+        int32x4_t lo = vld1q_s32(acc + i);
+        int32x4_t hi = vld1q_s32(acc + i + 4);
+        for (int d = 0; d < n_add; ++d) {
+            int16x8_t w = vld1q_s16(adds[d] + i);
+            lo = vaddw_s16(lo, vget_low_s16(w));
+            hi = vaddw_s16(hi, vget_high_s16(w));
+        }
+        for (int d = 0; d < n_sub; ++d) {
+            int16x8_t w = vld1q_s16(subs[d] + i);
+            lo = vsubw_s16(lo, vget_low_s16(w));
+            hi = vsubw_s16(hi, vget_high_s16(w));
+        }
+        vst1q_s32(acc + i,     lo);
+        vst1q_s32(acc + i + 4, hi);
+    }
+}
+
 // Process 8 hidden units per iteration. Clip int32 accumulator to
 // [0, 127], saturating-narrow to int16, multiply-widen against int16
 // weights into int32 partial sums, horizontally reduce at the end.
@@ -185,6 +252,11 @@ inline void add_column(int32_t* acc, const int16_t* col) {
 }
 inline void sub_column(int32_t* acc, const int16_t* col) {
     reference::sub_column(acc, col);
+}
+inline void apply_deltas(int32_t* acc,
+                         const int16_t* const* adds, int n_add,
+                         const int16_t* const* subs, int n_sub) {
+    reference::apply_deltas(acc, adds, n_add, subs, n_sub);
 }
 inline int32_t forward_side(const int32_t* acc, const int16_t* weights) {
     return reference::forward_side(acc, weights);

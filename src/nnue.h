@@ -127,10 +127,29 @@ void force_refresh_accumulator(const Position& pos);
 // Both sides' accumulators are touched (each perspective sees the
 // piece); kings are handled via the dirty-flag path instead. No-op
 // when the network isn't loaded.
+//
+// When `acc.batch.active` is set, these functions do not touch
+// `acc.values` directly — they append a delta to `acc.batch` for
+// end_batch() to apply in a single fused pass. The batched path
+// turns a capture's three sequential sweeps into one, which is the
+// main perf win in the make_move hot path.
 void add_piece_to_accumulator(const Position& pos, Accumulator& acc,
                               Square sq, PieceType pt, Color piece_color);
 void sub_piece_from_accumulator(const Position& pos, Accumulator& acc,
                                 Square sq, PieceType pt, Color piece_color);
+
+// Begin a batched update sequence. All add/sub calls between
+// begin_batch and end_batch stage deltas in `acc.batch` instead of
+// touching `acc.values`. Idempotent — a begin on an already-active
+// batch is a no-op (asserts in debug), since nested make_move would
+// be a serious bug.
+void begin_batch(Accumulator& acc);
+
+// Flush any staged deltas and clear the batch. Walks the hidden
+// array ONCE per non-dirty perspective, applying every staged delta
+// per chunk. Dirty perspectives skip the flush — their deltas are
+// about to be overwritten by refresh_accumulator anyway.
+void end_batch(const Position& pos, Accumulator& acc);
 
 // Map (king_sq, piece_sq, piece_type, piece_color) → feature index
 // for a given "perspective" (which side's king the features are
